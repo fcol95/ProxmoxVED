@@ -1,0 +1,53 @@
+{
+    "name": "Chaptarr",
+    "slug": "chaptarr",
+    "categories": [
+        11,
+        13,
+        14
+    ],
+    "date_created": "2026-09-02",
+    "type": "ct",
+    "updateable": true,
+    "privileged": false,
+    "interface_port": 8789,
+    "documentation": "https://wiki.chaptarr.com/",
+    "website": "https://chaptarr.com/",
+    "repository": "https://github.com/Chaptarr/chaptarr",
+    "architectures": [
+        "amd64"
+    ],
+    "platforms": [
+        "pve"
+    ],
+    "logo": "https://cdn.jsdelivr.net/gh/selfhst/icons@main/webp/chaptarr.webp",
+    "description": "A book collection manager for audiobooks and ebooks with metadata, organization, and download automation.",
+    "install_methods": [
+        {
+            "type": "default",
+            "script": "ct/chaptarr.sh",
+            "config_path": "/opt/chaptarr_data/config.xml",
+            "resources": {
+                "cpu": 4,
+                "ram": 4096,
+                "hdd": 40,
+                "os": "Debian",
+                "version": "13"
+            }
+        }
+    ],
+    "default_credentials": {
+        "username": null,
+        "password": null
+    },
+    "notes": [
+        {
+            "text": "Chaptarr is beta software. Set the initial username and password on first launch.",
+            "type": "warning"
+        },
+        {
+            "text": "Configure audiobook, ebook, and download paths from the Chaptarr web interface.",
+            "type": "info"
+        }
+    ]
+}
