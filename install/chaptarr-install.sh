@@ -5,6 +5,7 @@
 # License: MIT | https://github.com/community-scripts/ProxmoxVED/raw/main/LICENSE
 # Source: https://github.com/Chaptarr/chaptarr
 
+# shellcheck disable=SC1091 # Standard community scripts sourcing mechanism
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
 color
 verb_ip6
@@ -24,10 +25,10 @@ DOTNET_VERSION="10" DOTNET_TYPE="sdk" setup_dotnet
 fetch_and_deploy_gh_release "chaptarr" "Chaptarr/chaptarr" "tarball"
 
 msg_info "Building Chaptarr"
-cd /opt/chaptarr/frontend
+cd /opt/chaptarr/frontend || exit
 $STD yarn install --immutable
 $STD yarn build
-cd /opt/chaptarr
+cd /opt/chaptarr || exit
 rm -rf /opt/chaptarr_app
 DOTNET_CLI_TELEMETRY_OPTOUT=1 $STD dotnet publish src/NzbDrone.Console/Chaptarr.Console.csproj -c Release -f net10.0 -o /opt/chaptarr_app /p:UseAppHost=false /p:Version="$(cat ~/.chaptarr)"
 cp -r /opt/chaptarr/_output/UI /opt/chaptarr_app/

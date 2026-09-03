@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 _cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+# shellcheck disable=SC1090 # Dynamic sourcing of core functions
 source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: fcol95
@@ -41,10 +42,10 @@ function update_script() {
 
     restore_backup
     msg_info "Building Chaptarr"
-    cd /opt/chaptarr/frontend
+    cd /opt/chaptarr/frontend || exit
     $STD yarn install --immutable
     $STD yarn build
-    cd /opt/chaptarr
+    cd /opt/chaptarr || exit
     rm -rf /opt/chaptarr_app
     DOTNET_CLI_TELEMETRY_OPTOUT=1 $STD dotnet publish src/NzbDrone.Console/Chaptarr.Console.csproj -c Release -f net10.0 -o /opt/chaptarr_app /p:UseAppHost=false /p:Version="$(cat ~/.chaptarr)"
     cp -r /opt/chaptarr/_output/UI /opt/chaptarr_app/
