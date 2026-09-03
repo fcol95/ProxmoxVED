@@ -9,9 +9,9 @@ source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_
 
 APP="Chaptarr"
 var_tags="${var_tags:-arr;audiobooks;ebooks;media}"
-var_cpu="${var_cpu:-4}"
-var_ram="${var_ram:-4096}"
-var_disk="${var_disk:-40}"
+var_cpu="${var_cpu:-2}"
+var_ram="${var_ram:-2048}"
+var_disk="${var_disk:-8}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
 var_arm64="${var_arm64:-no}" # unset = ask the user; set yes/no only when verified
@@ -32,13 +32,13 @@ function update_script() {
     exit
   fi
 
-  if check_for_gh_release "chaptarr" "Chaptarr/chaptarr"; then
+  if GH_INCLUDE_PRERELEASE=1 check_for_gh_release "chaptarr" "Chaptarr/chaptarr"; then
     msg_info "Stopping Service"
     systemctl stop chaptarr
     msg_ok "Stopped Service"
     create_backup /opt/chaptarr_data
 
-    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "chaptarr" "Chaptarr/chaptarr" "tarball"
+    GH_INCLUDE_PRERELEASE=1 CLEAN_INSTALL=1 fetch_and_deploy_gh_release "chaptarr" "Chaptarr/chaptarr" "tarball"
 
     restore_backup
     msg_info "Building Chaptarr"

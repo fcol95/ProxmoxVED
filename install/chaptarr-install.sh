@@ -22,7 +22,7 @@ setup_ffmpeg
 NODE_VERSION="22" NODE_MODULE="yarn" setup_nodejs
 DOTNET_VERSION="10" DOTNET_TYPE="sdk" setup_dotnet
 
-fetch_and_deploy_gh_release "chaptarr" "Chaptarr/chaptarr" "tarball"
+GH_INCLUDE_PRERELEASE=1 fetch_and_deploy_gh_release "chaptarr" "Chaptarr/chaptarr" "tarball"
 
 msg_info "Building Chaptarr"
 cd /opt/chaptarr/frontend || exit
