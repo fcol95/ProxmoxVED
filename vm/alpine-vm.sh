@@ -32,16 +32,7 @@ trap 'post_update_to_api "failed" "129"; exit 129' SIGHUP
 TEMP_DIR=$(mktemp -d)
 pushd "$TEMP_DIR" >/dev/null
 
-if vm_confirm_new_vm "$APP" "This will create a new Alpine Linux VM from the official cloud image.\n\nAlpine runs on musl and OpenRC and idles in well under 100 MB, so it suits small always-on services. A VM gives it a kernel of its own, which an LXC cannot.\n\nProceed?"; then
-  :
-else
-  header_info && exit_script
-fi
-
-check_root
-arch_check
-pve_check
-ssh_check
+vm_preflight
 
 function default_settings() {
   VMID=$(get_valid_nextid)
@@ -117,13 +108,13 @@ fi
 ALPINE_VERSION=$(echo "$FILE" | grep -oP 'generic_alpine-\K[0-9.]+')
 msg_ok "Alpine ${CL}${BL}${ALPINE_VERSION}${CL} ${GN}(${FILE})"
 
-curl -f#SL -o "$FILE" "${CLOUD_DIR}/${FILE}"
-echo -en "\e[1A\e[0K"
-msg_ok "Downloaded ${CL}${BL}${FILE}${CL}"
+URL="${CLOUD_DIR}/${FILE}"
+CACHE_FILE="$(vm_image_cache_path "$URL")"
+vm_fetch_image "$URL" "$CACHE_FILE" --cache --min-bytes $((5 * 1024 * 1024)) || exit 115
 
 msg_info "Customizing ${FILE}"
 WORK_FILE=$(mktemp --suffix=.qcow2)
-cp "$FILE" "$WORK_FILE"
+cp "$CACHE_FILE" "$WORK_FILE"
 popd >/dev/null
 rm -rf "$TEMP_DIR"
 
@@ -161,9 +152,7 @@ set_description
 rm -f "$WORK_FILE"
 msg_ok "Created an Alpine VM ${CL}${BL}(${HN})"
 
-msg_info "Resizing disk to ${DISK_SIZE}"
-qm resize "$VMID" scsi0 "${DISK_SIZE}" >/dev/null
-msg_ok "Resized disk to ${DISK_SIZE}"
+vm_resize_disk
 
 vm_provision "$VMID" || true
 

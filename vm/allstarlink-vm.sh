@@ -9,21 +9,22 @@ COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.co
 source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/pve/vm-core.func")
 load_functions
 
-header_info
-echo -e "\n Loading..."
 GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 NEXTID=$(pvesh get /cluster/nextid)
 RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
 METHOD=""
 APP="AllStarLink"
 APP_TYPE="vm"
-NSAPP="debian12vm"
+NSAPP="allstarlink-vm"
 var_os="debian"
-var_version="12"
+var_version="13"
 DISK_SIZE="8G"
 
 HA=$(echo "\033[1;34m")
 THIN="discard=on,ssd=1,"
+
+header_info
+echo -e "\n Loading..."
 set -e
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
@@ -32,11 +33,25 @@ trap 'post_update_to_api "failed" "TERMINATED"' SIGTERM
 
 TEMP_DIR=$(mktemp -d)
 pushd $TEMP_DIR >/dev/null
-if whiptail --backtitle "Proxmox VE Helper Scripts" --title "AllStarLink VM" --yesno "This will create a New AllStarLink VM. Proceed?" 10 58; then
-  :
+
+if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+  var_version="${VM_OS_VERSION:-$var_version}"
+elif vm_dialog radiolist "DEBIAN BASE" "Choose the Debian release AllStarLink runs on" --cancel-button Exit-Script 11 60 2 \
+  "13" "Debian 13 (Trixie)" ON \
+  "12" "Debian 12 (Bookworm)" OFF; then
+  var_version="$VM_DIALOG_RESULT"
 else
-  header_info && echo -e "⚠ User exited script \n" && exit
+  exit_script
 fi
+
+case "$var_version" in
+13) DEBIAN_CODENAME="trixie" ;;
+12) DEBIAN_CODENAME="bookworm" ;;
+*)
+  msg_error "AllStarLink only publishes packages for Debian 12 and 13 (got '${var_version}')"
+  exit 1
+  ;;
+esac
 
 function default_settings() {
   vm_apply_machine_type "i440fx"
@@ -82,22 +97,21 @@ function advanced_settings() {
 }
 
 
-check_root
-arch_check
-pve_check
-ssh_check
+vm_preflight
 vm_start_script "Use Default Settings?" 10 58
 post_to_api_vm
 
 vm_select_storage "$HN"
-msg_info "Retrieving the URL for the Debian 12 Qcow2 Disk Image"
-URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-nocloud-$(dpkg --print-architecture).qcow2"
+msg_info "Retrieving the URL for the Debian ${var_version} Qcow2 Disk Image"
+URL="https://cloud.debian.org/images/cloud/${DEBIAN_CODENAME}/latest/debian-${var_version}-nocloud-$(dpkg --print-architecture).qcow2"
 sleep 2
 msg_ok "${CL}${BL}${URL}${CL}"
-curl -fsSL -o "$(basename "$URL")" "$URL"
-echo -en "\e[1A\e[0K"
-FILE=$(basename $URL)
-msg_ok "Downloaded ${CL}${BL}${FILE}${CL}"
+CACHE_FILE="$(vm_image_cache_path "$URL")"
+vm_fetch_image "$URL" "$CACHE_FILE" --cache --min-bytes $((100 * 1024 * 1024)) || exit 115
+FILE="$(basename "$CACHE_FILE")"
+# Work on a copy: the expand and virt-customize steps below rewrite the image,
+# which would poison the cache for every later VM.
+cp -f "$CACHE_FILE" "$FILE"
 
 # qm resize only grows the block device. Without cloud-init nothing grows the
 # guest partition, so expand it offline first.
@@ -129,15 +143,16 @@ for i in {0,1}; do
 done
 
 msg_info "Installing Pre-Requisite libguestfs-tools onto Host"
-apt-get -qq update && apt-get -qq install libguestfs-tools lsb-release -y >/dev/null
+$STD apt-get update
+$STD apt-get install -y libguestfs-tools lsb-release
 msg_ok "Installed libguestfs-tools successfully"
 
 msg_info "Adding ASL Package Repository"
 virt-customize -q -a "${FILE}" \
-  --run-command "curl -fsSL https://repo.allstarlink.org/public/asl-apt-repos.deb12_all.deb -o /tmp/asl-apt-repos.deb12_all.deb" \
-  --run-command "dpkg -i /tmp/asl-apt-repos.deb12_all.deb" \
+  --run-command "curl -fsSL https://repo.allstarlink.org/public/asl-apt-repos.deb${var_version}_all.deb -o /tmp/asl-apt-repos.deb${var_version}_all.deb" \
+  --run-command "dpkg -i /tmp/asl-apt-repos.deb${var_version}_all.deb" \
   --update \
-  --run-command "rm -f /tmp/asl-apt-repos.deb12_all.deb" >/dev/null
+  --run-command "rm -f /tmp/asl-apt-repos.deb${var_version}_all.deb" >/dev/null
 msg_ok "Added ASL Package Repository"
 
 msg_info "Installing AllStarLink (patience)"
@@ -146,10 +161,19 @@ virt-customize -q -a "${FILE}" \
   --run-command "sed -i \"/secret /s/= .*/= $(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c13)/\" /etc/asterisk/manager.conf" >/dev/null
 msg_ok "Installed AllStarLink"
 
-if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "SETTINGS" --yesno "Would you like to add Allmon3?" 10 58); then
+vm_prepare_cloud_image "$FILE" "$HN" || true
+
+if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+  ADD_ALLMON3="${VM_ALLMON3:-no}"
+elif vm_dialog yesno "SETTINGS" "Would you like to add Allmon3?" 10 58; then
+  ADD_ALLMON3="yes"
+else
+  ADD_ALLMON3="no"
+fi
+
+if [[ "$ADD_ALLMON3" == "yes" ]]; then
   msg_info "Installing Allmon3"
   virt-customize -q -a "${FILE}" \
-vm_prepare_cloud_image "$FILE" "$HN" || true
     --install allmon3 \
     --run-command "sed -i \"s/;pass=.*/;pass=\$(sed -ne 's/^secret = //p' /etc/asterisk/manager.conf)/\" /etc/allmon3/allmon3.ini" >/dev/null
   msg_ok "Installed Allmon3"
@@ -157,7 +181,7 @@ fi
 
 msg_info "Creating a AllStarLink VM"
 qm create $VMID -agent 1${MACHINE} -tablet 0 -localtime 1 -bios ovmf${CPU_TYPE} -cores $CORE_COUNT -memory $RAM_SIZE \
-  -name $HN -tags community-script,debian12,radio -net0 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
+  -name $HN -tags community-script,debian${var_version},radio -net0 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
 pvesm alloc $STORAGE $VMID $DISK0 4M 1>&/dev/null
 qm importdisk $VMID ${FILE} $STORAGE ${DISK_IMPORT:-} 1>&/dev/null
 qm set $VMID \
@@ -165,40 +189,10 @@ qm set $VMID \
   -scsi0 ${DISK1_REF},${DISK_CACHE}${THIN}size=2G \
   -boot order=scsi0 \
   -serial0 socket >/dev/null
-qm resize $VMID scsi0 8G >/dev/null
+vm_resize_disk
 qm set $VMID --agent enabled=1 >/dev/null
 
-DESCRIPTION=$(
-  cat <<EOF
-<div align='center'>
-  <a href='https://Helper-Scripts.com' target='_blank' rel='noopener noreferrer'>
-    <img src='${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/images/logo-81x112.png' alt='Logo' style='width:81px;height:112px;'/>
-  </a>
-
-  <h2 style='font-size: 24px; margin: 20px 0;'>AllStarLink VM</h2>
-
-  <p style='margin: 16px 0;'>
-    <a href='https://ko-fi.com/community_scripts' target='_blank' rel='noopener noreferrer'>
-      <img src='https://img.shields.io/badge/&#x2615;-Buy us a coffee-blue' alt='spend Coffee' />
-    </a>
-  </p>
-
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-github fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>GitHub</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-comments fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/discussions' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Discussions</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-exclamation-circle fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/issues' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Issues</a>
-  </span>
-</div>
-EOF
-)
-qm set "$VMID" -description "$DESCRIPTION" >/dev/null
+set_description
 
 msg_ok "Created a AllStarLink VM ${CL}${BL}(${HN})"
 if [ "$START_VM" == "yes" ]; then

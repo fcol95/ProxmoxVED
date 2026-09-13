@@ -29,19 +29,13 @@ trap 'post_update_to_api "failed" "130"' SIGINT
 trap 'post_update_to_api "failed" "143"' SIGTERM
 trap 'post_update_to_api "failed" "129"; exit 129' SIGHUP
 
-TEMP_DIR=$(mktemp -d)
+# /var/tmp rather than /tmp, the same choice opnsense-vm.sh makes: the extracted
+# recovery image is about 9.5 GB and /tmp is a tmpfs sized from RAM on a stock
+# Proxmox host (7.7 GiB on a 16 GB machine), so unzip runs it out of space.
+TEMP_DIR=$(mktemp -d /var/tmp/chromeos-flex-vm.XXXXXX 2>/dev/null || mktemp -d)
 pushd "$TEMP_DIR" >/dev/null
 
-if vm_confirm_new_vm "$APP" "This will create a new ChromeOS Flex VM from Google's official recovery image.\n\nNote that Google does not support ChromeOS Flex in a virtual machine. It runs, but it is not a configuration they test.\n\nFlex has no Play Store and no Android apps.\n\nProceed?"; then
-  :
-else
-  header_info && exit_script
-fi
-
-check_root
-arch_check
-pve_check
-ssh_check
+vm_preflight
 
 function default_settings() {
   VMID=$(get_valid_nextid)
@@ -118,12 +112,12 @@ if [[ -z "$URL" || -z "$IMAGE_FILE" ]]; then
   exit 1
 fi
 
-ZIP_FILE="$(basename "$URL")"
 msg_ok "ChromeOS Flex ${CL}${BL}${FLEX_VERSION}${CL} ${GN}(Chrome ${CHROME_VERSION})"
 
-# The zip is about 1.3 GB and expands to roughly 9.5 GB, so the work directory
-# needs both at once. Failing here beats failing forty minutes into a download.
-NEED_MIB=$(((EXPECT_ZIP_BYTES + EXPECT_BIN_BYTES) / 1048576 + 1024))
+# The archive lives in the image cache; only the roughly 9.5 GB it expands to
+# has to fit in the work directory. Failing here beats failing forty minutes
+# into a download.
+NEED_MIB=$((EXPECT_BIN_BYTES / 1048576 + 1024))
 AVAIL_MIB=$(df -Pm "$TEMP_DIR" | awk 'NR==2 {print $4}')
 if ((AVAIL_MIB < NEED_MIB)); then
   msg_error "Need ${NEED_MIB} MiB free for the image, ${TEMP_DIR} has ${AVAIL_MIB} MiB"
@@ -138,28 +132,24 @@ if ! command -v unzip &>/dev/null; then
   msg_ok "Installed unzip"
 fi
 
+CACHE_FILE="$(vm_image_cache_path "$URL")"
+# The index carries the exact zip length, so the cached copy is re-checked
+# against it on every run: a respin that changes the size invalidates it.
+FETCH_ARGS=(--cache --min-bytes $((500 * 1024 * 1024)))
+if [[ -n "$EXPECT_ZIP_BYTES" ]]; then
+  FETCH_ARGS+=(--exact-bytes "$EXPECT_ZIP_BYTES")
+fi
 msg_info "Downloading ChromeOS Flex (about 1.3 GB)"
-if ! curl -f#SL --retry 3 --retry-delay 5 -o "$ZIP_FILE" "$URL"; then
-  msg_error "Failed to download the ChromeOS Flex image"
-  exit 1
-fi
-echo -en "\e[1A\e[0K"
-
-GOT_BYTES=$(stat -c%s "$ZIP_FILE" 2>/dev/null || echo 0)
-if [[ -n "$EXPECT_ZIP_BYTES" ]] && ((GOT_BYTES != EXPECT_ZIP_BYTES)); then
-  msg_error "Downloaded ${GOT_BYTES} bytes, the index says ${EXPECT_ZIP_BYTES}"
-  exit 1
-fi
-msg_ok "Downloaded ${CL}${BL}${ZIP_FILE}${CL}"
+vm_fetch_image "$URL" "$CACHE_FILE" "${FETCH_ARGS[@]}" || exit 115
 
 msg_info "Extracting the disk image (about 9.5 GB)"
 # unzip checks the CRC-32 the archive carries for the file and exits non-zero
-# when it does not match, so this doubles as the real integrity check.
-if ! $STD unzip -o "$ZIP_FILE"; then
+# when it does not match, so this doubles as the real integrity check. Reading
+# only, into the work directory -- the cached archive is left alone.
+if ! $STD unzip -o "$CACHE_FILE"; then
   msg_error "Extraction failed -- the archive is corrupt (CRC mismatch)"
   exit 1
 fi
-rm -f "$ZIP_FILE"
 if [[ ! -f "$IMAGE_FILE" ]]; then
   msg_error "Expected ${IMAGE_FILE} in the archive, it is not there"
   exit 1
@@ -228,9 +218,7 @@ rm -f "$WORK_FILE"
 rm -rf "$TEMP_DIR"
 msg_ok "Created a ChromeOS Flex VM ${CL}${BL}(${HN})"
 
-msg_info "Resizing disk to ${DISK_SIZE}"
-qm resize "$VMID" sata0 "${DISK_SIZE}" >/dev/null
-msg_ok "Resized disk to ${DISK_SIZE}"
+vm_resize_disk sata0
 
 if [ "$START_VM" == "yes" ]; then
   msg_info "Starting ChromeOS Flex VM"

@@ -16,8 +16,6 @@ function header_info {
 K3s
 EOF
 }
-header_info
-echo -e "\n Loading..."
 GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
 METHOD=""
@@ -35,6 +33,9 @@ OS_CODENAME=""
 OS_DISPLAY=""
 
 THIN="discard=on,ssd=1,"
+
+header_info
+echo -e "\n Loading..."
 set -e
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
@@ -50,63 +51,70 @@ function error_handler() {
   cleanup_vmid
 }
 
-function ssh_check() {
-  if command -v pveversion >/dev/null 2>&1; then
-    if [ -n "${SSH_CLIENT:-}" ]; then
-      if whiptail --backtitle "Proxmox VE Helper Scripts" --defaultno --title "SSH DETECTED" --yesno "It's suggested to use the Proxmox shell instead of SSH, since SSH can create issues while gathering variables. Would you like to proceed with using SSH?" 10 62; then
-        :
-      else
-        clear
-        exit
-      fi
-    fi
-  fi
-}
 
 function select_os() {
-  if OS_CHOICE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "SELECT OS" --radiolist \
-    "Choose Operating System for K3s VM" 14 68 4 \
+  if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+    OS_CHOICE="${VM_OS_VERSION:-debian13}"
+  elif ! OS_CHOICE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "SELECT OS" --radiolist \
+    "Choose Operating System for K3s VM" 15 68 5 \
     "debian13" "Debian 13 (Trixie) - Latest" ON \
     "debian12" "Debian 12 (Bookworm) - Stable" OFF \
+    "ubuntu2604" "Ubuntu 26.04 LTS (Resolute)" OFF \
     "ubuntu2404" "Ubuntu 24.04 LTS (Noble)" OFF \
     "ubuntu2204" "Ubuntu 22.04 LTS (Jammy)" OFF \
     3>&1 1>&2 2>&3); then
-    case $OS_CHOICE in
-    debian13)
-      OS_TYPE="debian"
-      OS_VERSION="13"
-      OS_CODENAME="trixie"
-      OS_DISPLAY="Debian 13 (Trixie)"
-      ;;
-    debian12)
-      OS_TYPE="debian"
-      OS_VERSION="12"
-      OS_CODENAME="bookworm"
-      OS_DISPLAY="Debian 12 (Bookworm)"
-      ;;
-    ubuntu2404)
-      OS_TYPE="ubuntu"
-      OS_VERSION="24.04"
-      OS_CODENAME="noble"
-      OS_DISPLAY="Ubuntu 24.04 LTS"
-      ;;
-    ubuntu2204)
-      OS_TYPE="ubuntu"
-      OS_VERSION="22.04"
-      OS_CODENAME="jammy"
-      OS_DISPLAY="Ubuntu 22.04 LTS"
-      ;;
-    esac
-    echo -e "${OS}${BOLD}${DGN}Operating System: ${BGN}${OS_DISPLAY}${CL}"
-  else
     exit_script
   fi
+
+  case $OS_CHOICE in
+  debian13)
+    OS_TYPE="debian"
+    OS_VERSION="13"
+    OS_CODENAME="trixie"
+    OS_DISPLAY="Debian 13 (Trixie)"
+    ;;
+  debian12)
+    OS_TYPE="debian"
+    OS_VERSION="12"
+    OS_CODENAME="bookworm"
+    OS_DISPLAY="Debian 12 (Bookworm)"
+    ;;
+  ubuntu2604)
+    OS_TYPE="ubuntu"
+    OS_VERSION="26.04"
+    OS_CODENAME="resolute"
+    OS_DISPLAY="Ubuntu 26.04 LTS"
+    ;;
+  ubuntu2404)
+    OS_TYPE="ubuntu"
+    OS_VERSION="24.04"
+    OS_CODENAME="noble"
+    OS_DISPLAY="Ubuntu 24.04 LTS"
+    ;;
+  ubuntu2204)
+    OS_TYPE="ubuntu"
+    OS_VERSION="22.04"
+    OS_CODENAME="jammy"
+    OS_DISPLAY="Ubuntu 22.04 LTS"
+    ;;
+  *)
+    msg_error "Unsupported OS '${OS_CHOICE}' (expected debian13, debian12, ubuntu2604, ubuntu2404 or ubuntu2204)"
+    exit 1
+    ;;
+  esac
+  echo -e "${OS}${BOLD}${DGN}Operating System: ${BGN}${OS_DISPLAY}${CL}"
 }
 
 function select_cloud_init() {
   if [ "$OS_TYPE" = "ubuntu" ]; then
     USE_CLOUD_INIT="yes"
     echo -e "${CLOUD:-${TAB}☁️${TAB}${CL}}${BOLD}${DGN}Cloud-Init: ${BGN}yes (Ubuntu requires Cloud-Init)${CL}"
+    return
+  fi
+
+  if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+    USE_CLOUD_INIT="${VM_CLOUD_INIT:-no}"
+    echo -e "${CLOUD:-${TAB}☁️${TAB}${CL}}${BOLD}${DGN}Cloud-Init: ${BGN}${USE_CLOUD_INIT}${CL}"
     return
   fi
 
@@ -142,18 +150,10 @@ cleanup_vmid
 cleanup
 post_update_to_api "done" "none"
 [[ -n "${TEMP_DIR:-}" && -d "$TEMP_DIR" ]] && rm -rf "$TEMP_DIR"
-check_root
-pve_check
-arch_check
-ssh_check
+vm_preflight
 
 TEMP_DIR=$(mktemp -d)
 pushd $TEMP_DIR >/dev/null
-if whiptail --backtitle "Proxmox VE Helper Scripts" --title "K3s VM" --yesno "This will create a New K3s VM. Proceed?" 10 58; then
-  :
-else
-  header_info && exit_script
-fi
 
 function default_settings() {
   vm_apply_machine_type "q35"
@@ -213,10 +213,12 @@ msg_info "Retrieving the URL for the ${OS_DISPLAY} image"
 URL=$(get_image_url)
 sleep 2
 msg_ok "${CL}${BL}${URL}${CL}"
-curl -f#SL "$URL" -O
-echo -en "\e[1A\e[0K"
-FILE=$(basename $URL)
-msg_ok "Downloaded ${CL}${BL}${FILE}${CL}"
+CACHE_FILE="$(vm_image_cache_path "$URL")"
+vm_fetch_image "$URL" "$CACHE_FILE" --cache --min-bytes $((100 * 1024 * 1024)) || exit 115
+FILE="$(basename "$CACHE_FILE")"
+# Work on a copy: vm_expand_image, virt-customize and vm_prepare_cloud_image all
+# rewrite the image in place, which would poison the cache for every later VM.
+cp -f "$CACHE_FILE" "$FILE"
 
 # qm resize only grows the block device. Without cloud-init nothing grows the
 # guest partition, so expand it offline first.
@@ -258,13 +260,7 @@ qm set $VMID \
   -boot order=scsi0 \
   -serial0 socket >/dev/null
 
-if [ -n "$DISK_SIZE" ]; then
-  msg_info "Resizing disk to $DISK_SIZE GB"
-  qm resize $VMID scsi0 ${DISK_SIZE} >/dev/null
-else
-  msg_info "Using default disk size of $DEFAULT_DISK_SIZE GB"
-  qm resize $VMID scsi0 ${DEFAULT_DISK_SIZE} >/dev/null
-fi
+vm_resize_disk
 
 case "$(dpkg --print-architecture)" in
 amd64)
@@ -308,10 +304,11 @@ else
 fi
 rm -f /tmp/k9s.tar.gz
 
+vm_prepare_cloud_image "$FILE" "$HN" || true
+
 if [[ "$INSTALL_ARGOCD_BOOTSTRAP" == "1" ]]; then
   msg_info "Add in Image ArgoCD Bootstrap"
   virt-customize -q -a "${FILE}" \
-vm_prepare_cloud_image "$FILE" "$HN" || true
     --run-command 'mkdir -p /usr/local/sbin /etc/systemd/system /var/lib' \
     --run-command 'cat <<"EOF" >/usr/local/sbin/bootstrap-argocd.sh
 #!/usr/bin/env bash
@@ -360,6 +357,7 @@ else
   msg_info "Skipping ArgoCD Bootstrap (INSTALL_ARGOCD_BOOTSTRAP=$INSTALL_ARGOCD_BOOTSTRAP)"
 fi
 
+set_description
 msg_ok "Created a K3s VM ${CL}${BL}(${HN})"
 
 if [ "$USE_CLOUD_INIT" = "yes" ] && command -v setup_cloud_init >/dev/null 2>&1; then
@@ -375,4 +373,3 @@ if [ "$START_VM" == "yes" ]; then
 fi
 
 msg_ok "Completed successfully!\n"
-msg_custom "More Info at https://github.com/community-scripts/ProxmoxVED/discussions/836"

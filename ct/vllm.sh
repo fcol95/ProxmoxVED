@@ -40,11 +40,44 @@ function update_script() {
 
     create_backup /opt/vllm/vllm.env
 
-    msg_info "Updating vLLM (Patience)"
-    $STD uv pip install --python /opt/vllm/bin/python --upgrade vllm
-    msg_ok "Updated vLLM"
+    VLLM_BACKEND="$(cat /opt/vllm/.backend 2>/dev/null || echo cuda)"
+    VLLM_VERSION="$(get_latest_github_release "vllm-project/vllm")"
+    msg_info "Updating vLLM (${VLLM_BACKEND}, Patience)"
+    case "$VLLM_BACKEND" in
+    rocm)
+      $STD uv pip install --python /opt/vllm/bin/python --upgrade vllm \
+        --extra-index-url https://wheels.vllm.ai/rocm/
+      ;;
+    cpu)
+      $STD uv pip install --python /opt/vllm/bin/python \
+        "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_x86_64.whl" \
+        --torch-backend cpu
+      ;;
+    *)
+      $STD uv pip install --python /opt/vllm/bin/python --upgrade vllm
+      ;;
+    esac
+    msg_ok "Updated vLLM (${VLLM_BACKEND})"
 
     restore_backup
+
+    msg_info "Refreshing CUDA Environment"
+    CUDA_ROOT="$(find /opt/vllm/lib/python3*/site-packages/nvidia -maxdepth 1 -type d -name 'cu[0-9]*' 2>/dev/null | sort -V | tail -1 || true)"
+    if [[ -n "$CUDA_ROOT" ]]; then
+      CUDART="$(find "${CUDA_ROOT}/lib" -maxdepth 1 -name 'libcudart.so.*' 2>/dev/null | sort -V | tail -1 || true)"
+      if [[ -n "$CUDART" && ! -e "${CUDA_ROOT}/lib/libcudart.so" ]]; then
+        ln -s "$(basename "$CUDART")" "${CUDA_ROOT}/lib/libcudart.so"
+      fi
+      sed -i '/^\(CUDA_HOME\|FLASHINFER_NVCC\|PATH\|LD_LIBRARY_PATH\|LIBRARY_PATH\)=/d' /opt/vllm/vllm.env
+      cat <<EOF >>/opt/vllm/vllm.env
+CUDA_HOME=${CUDA_ROOT}
+FLASHINFER_NVCC=${CUDA_ROOT}/bin/nvcc
+PATH=${CUDA_ROOT}/bin:/opt/vllm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+LD_LIBRARY_PATH=${CUDA_ROOT}/lib
+LIBRARY_PATH=${CUDA_ROOT}/lib
+EOF
+    fi
+    msg_ok "Refreshed CUDA Environment"
 
     msg_info "Starting Service"
     systemctl start vllm

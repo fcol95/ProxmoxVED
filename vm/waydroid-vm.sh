@@ -50,42 +50,37 @@ trap 'post_update_to_api "failed" "129"; exit 129' SIGHUP
 TEMP_DIR=$(mktemp -d)
 pushd "$TEMP_DIR" >/dev/null
 
-if vm_confirm_new_vm "$APP" "This will create a New $APP. Proceed?"; then
-  :
-else
-  header_info && exit_script
-fi
-
-check_root
-arch_check
-pve_check
-ssh_check
+vm_preflight
 
 # ---------------------------------------------------------------------------
 # OS Selection
 # ---------------------------------------------------------------------------
 function select_os() {
-  local choice
-  if choice=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "OS SELECTION" \
+  if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+    OS_CHOICE="${VM_OS_VERSION:-ubuntu2404}"
+  elif ! OS_CHOICE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "OS SELECTION" \
     --radiolist "Choose the base operating system:" --cancel-button Exit-Script 12 68 2 \
     "ubuntu2404" "Ubuntu 24.04 LTS (Noble Numbat)" ON \
     "debian13" "Debian 13 (Trixie)" OFF \
     3>&1 1>&2 2>&3); then
-    OS_CHOICE="$choice"
-    case "$OS_CHOICE" in
-    ubuntu2404)
-      OS_LABEL="Ubuntu 24.04 LTS (Noble Numbat)"
-      OS_CODENAME="noble"
-      ;;
-    debian13)
-      OS_LABEL="Debian 13 (Trixie)"
-      OS_CODENAME="trixie"
-      ;;
-    esac
-    echo -e "${OS}${BOLD}${DGN}Base OS: ${BGN}${OS_LABEL}${CL}"
-  else
     exit_script
   fi
+
+  case "$OS_CHOICE" in
+  ubuntu2404)
+    OS_LABEL="Ubuntu 24.04 LTS (Noble Numbat)"
+    OS_CODENAME="noble"
+    ;;
+  debian13)
+    OS_LABEL="Debian 13 (Trixie)"
+    OS_CODENAME="trixie"
+    ;;
+  *)
+    msg_error "Unsupported OS '${OS_CHOICE}' (expected ubuntu2404 or debian13)"
+    exit 1
+    ;;
+  esac
+  echo -e "${OS}${BOLD}${DGN}Base OS: ${BGN}${OS_LABEL}${CL}"
 }
 
 select_os
@@ -151,19 +146,8 @@ function advanced_settings() {
   fi
 }
 
-function start_script() {
-  if vm_choose_settings_mode; then
-    header_info
-    echo -e "${DEFAULT}${BOLD}${BL}Using Default Settings${CL}"
-    default_settings
-  else
-    header_info
-    echo -e "${ADVANCED}${BOLD}${RD}Using Advanced Settings${CL}"
-    advanced_settings
-  fi
-}
 
-start_script
+vm_start_script "Use Default Settings?" 10 58
 post_to_api_vm
 
 vm_select_storage "$HN"
@@ -307,8 +291,7 @@ qm set $VMID \
   -serial0 socket >/dev/null
 set_description
 
-msg_info "Resizing disk to $DISK_SIZE"
-qm resize $VMID scsi0 ${DISK_SIZE} >/dev/null
+vm_resize_disk
 
 rm -f "$WORK_FILE"
 

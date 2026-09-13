@@ -52,20 +52,27 @@ trap 'post_update_to_api "failed" "129"; exit 129' SIGHUP
 TEMP_DIR=$(mktemp -d)
 pushd "$TEMP_DIR" >/dev/null
 
-if vm_confirm_new_vm "$APP" "This will create a New $APP VM. Proceed?"; then
-  :
-else
-  header_info && exit_script
-fi
-
-check_root
-arch_check
-pve_check
+vm_preflight
 
 # ==============================================================================
 # NETBIRD CONFIGURATION PROMPTS
 # ==============================================================================
 function configure_netbird_setup() {
+  if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+    if [[ -z "${VM_NETBIRD_DOMAIN:-}" ]]; then
+      msg_error "An unattended NetBird Server install needs VM_NETBIRD_DOMAIN"
+      msg_error "Set it to the public domain whose DNS A record points at this VM, e.g. VM_NETBIRD_DOMAIN=netbird.my-domain.com"
+      exit 1
+    fi
+    NETBIRD_DOMAIN_INPUT="$VM_NETBIRD_DOMAIN"
+    NETBIRD_PROXY_TYPE_INPUT="${VM_NETBIRD_PROXY_TYPE:-0}"
+    NETBIRD_EMAIL_INPUT="${VM_NETBIRD_EMAIL:-admin@${NETBIRD_DOMAIN_INPUT}}"
+    echo -e "${INFO}${BOLD}${DGN}NetBird Domain: ${BGN}${NETBIRD_DOMAIN_INPUT}${CL}"
+    echo -e "${INFO}${BOLD}${DGN}Reverse Proxy: ${BGN}${NETBIRD_PROXY_TYPE_INPUT}${CL}"
+    echo -e "${INFO}${BOLD}${DGN}Let's Encrypt Email: ${BGN}${NETBIRD_EMAIL_INPUT}${CL}"
+    return
+  fi
+
   while true; do
     if NETBIRD_DOMAIN_INPUT=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "NETBIRD DOMAIN" \
       --inputbox "Enter the public domain for your NetBird server.\n(DNS A record must point to this VM's public IP)\n\ne.g. netbird.my-domain.com" 11 65 "" \
@@ -117,42 +124,61 @@ function configure_netbird_setup() {
 # OS SELECTION
 # ==============================================================================
 function select_os() {
-  if OS_CHOICE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "SELECT OS" --radiolist \
-    "Choose Operating System for NetBird Server VM" 14 68 3 \
+  if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+    OS_CHOICE="${VM_OS_VERSION:-debian13}"
+  elif ! OS_CHOICE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "SELECT OS" --radiolist \
+    "Choose Operating System for NetBird Server VM" 15 68 4 \
     "debian13" "Debian 13 (Trixie) - Latest" ON \
     "debian12" "Debian 12 (Bookworm) - Stable" OFF \
+    "ubuntu2604" "Ubuntu 26.04 LTS (Resolute)" OFF \
     "ubuntu2404" "Ubuntu 24.04 LTS (Noble)" OFF \
     3>&1 1>&2 2>&3); then
-    case $OS_CHOICE in
-    debian13)
-      OS_TYPE="debian"
-      OS_VERSION="13"
-      OS_CODENAME="trixie"
-      OS_DISPLAY="Debian 13 (Trixie)"
-      ;;
-    debian12)
-      OS_TYPE="debian"
-      OS_VERSION="12"
-      OS_CODENAME="bookworm"
-      OS_DISPLAY="Debian 12 (Bookworm)"
-      ;;
-    ubuntu2404)
-      OS_TYPE="ubuntu"
-      OS_VERSION="24.04"
-      OS_CODENAME="noble"
-      OS_DISPLAY="Ubuntu 24.04 LTS"
-      ;;
-    esac
-    echo -e "${OS}${BOLD}${DGN}Operating System: ${BGN}${OS_DISPLAY}${CL}"
-  else
     exit_script
   fi
+
+  case $OS_CHOICE in
+  debian13)
+    OS_TYPE="debian"
+    OS_VERSION="13"
+    OS_CODENAME="trixie"
+    OS_DISPLAY="Debian 13 (Trixie)"
+    ;;
+  debian12)
+    OS_TYPE="debian"
+    OS_VERSION="12"
+    OS_CODENAME="bookworm"
+    OS_DISPLAY="Debian 12 (Bookworm)"
+    ;;
+  ubuntu2604)
+    OS_TYPE="ubuntu"
+    OS_VERSION="26.04"
+    OS_CODENAME="resolute"
+    OS_DISPLAY="Ubuntu 26.04 LTS"
+    ;;
+  ubuntu2404)
+    OS_TYPE="ubuntu"
+    OS_VERSION="24.04"
+    OS_CODENAME="noble"
+    OS_DISPLAY="Ubuntu 24.04 LTS"
+    ;;
+  *)
+    msg_error "Unsupported OS '${OS_CHOICE}' (expected debian13, debian12, ubuntu2604 or ubuntu2404)"
+    exit 1
+    ;;
+  esac
+  echo -e "${OS}${BOLD}${DGN}Operating System: ${BGN}${OS_DISPLAY}${CL}"
 }
 
 function select_cloud_init() {
   if [ "$OS_TYPE" = "ubuntu" ]; then
     USE_CLOUD_INIT="yes"
     echo -e "${CLOUD:-  }${BOLD}${DGN}Cloud-Init: ${BGN}yes (Ubuntu requires Cloud-Init)${CL}"
+    return
+  fi
+
+  if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+    USE_CLOUD_INIT="${VM_CLOUD_INIT:-no}"
+    echo -e "${CLOUD:-  }${BOLD}${DGN}Cloud-Init: ${BGN}${USE_CLOUD_INIT}${CL}"
     return
   fi
 
@@ -255,8 +281,8 @@ vm_select_storage "$HN"
 # ==============================================================================
 if ! command -v virt-customize &>/dev/null; then
   msg_info "Installing libguestfs-tools"
-  apt-get -qq update >/dev/null
-  apt-get -qq install libguestfs-tools -y >/dev/null
+  $STD apt-get update
+  $STD apt-get install -y libguestfs-tools
   msg_ok "Installed libguestfs-tools"
 fi
 

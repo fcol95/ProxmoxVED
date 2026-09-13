@@ -8,8 +8,6 @@ COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.co
 source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/pve/vm-core.func")
 load_functions
 
-header_info
-echo -e "Loading..."
 #API VARIABLES
 RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
 METHOD=""
@@ -24,6 +22,10 @@ GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:
 GEN_MAC_LAN=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 
 HA=$(echo "\033[1;34m")
+THIN="discard=on,ssd=1,"
+
+header_info
+echo -e "Loading..."
 set -Eeo pipefail
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
@@ -121,15 +123,6 @@ function send_line_to_vm() {
   done
   qm sendkey $VMID ret
 }
-
-if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "OPNsense VM" --yesno "This will create a New OPNsense VM. Proceed?" 10 58); then
-  :
-else
-  header_info && echo -e "⚠ User exited script \n" && exit
-fi
-
-# This function checks the version of Proxmox Virtual Environment (PVE) and exits if the version is not supported.
-# Supported: Proxmox VE 8.0.x – 8.9.x, 9.0 and 9.2
 
 function get_available_bridges() {
   ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | sort
@@ -468,51 +461,12 @@ function advanced_settings() {
   fi
 }
 
-function start_script() {
-  if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "SETTINGS" --yesno "Use Default Settings?" --no-button Advanced 10 58); then
-    header_info
-    echo -e "${BL}Using Default Settings${CL}"
-    default_settings
-  else
-    header_info
-    echo -e "${RD}Using Advanced Settings${CL}"
-    advanced_settings
-  fi
-}
 
-arch_check
-pve_check
-ssh_check
-start_script
+vm_preflight
+vm_start_script "Use Default Settings?" 10 58
 post_to_api_vm
 
-msg_info "Validating Storage"
-while read -r line; do
-  TAG=$(echo $line | awk '{print $1}')
-  TYPE=$(echo $line | awk '{printf "%-10s", $2}')
-  FREE=$(echo $line | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf( "%9sB", $6)}')
-  ITEM="  Type: $TYPE Free: $FREE "
-  OFFSET=2
-  if [[ $((${#ITEM} + $OFFSET)) -gt ${MSG_MAX_LENGTH:-} ]]; then
-    MSG_MAX_LENGTH=$((${#ITEM} + $OFFSET))
-  fi
-  STORAGE_MENU+=("$TAG" "$ITEM" "OFF")
-done < <(pvesm status -content images | awk 'NR>1')
-VALID=$(pvesm status -content images | awk 'NR>1')
-if [ -z "$VALID" ]; then
-  msg_error "Unable to detect a valid storage location."
-  exit
-elif [ $((${#STORAGE_MENU[@]} / 3)) -eq 1 ]; then
-  STORAGE=${STORAGE_MENU[0]}
-else
-  while [ -z "${STORAGE:+x}" ]; do
-    STORAGE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "Storage Pools" --radiolist \
-      "Which storage pool would you like to use for ${HN}?\nTo make a selection, use the Spacebar.\n" \
-      16 $(($MSG_MAX_LENGTH + 23)) 6 \
-      "${STORAGE_MENU[@]}" 3>&1 1>&2 2>&3)
-  done
-fi
-msg_ok "Using ${CL}${BL}$STORAGE${CL} ${GN}for Storage Location."
+vm_select_storage "$HN"
 msg_ok "Virtual Machine ID is ${CL}${BL}$VMID${CL}."
 msg_info "Retrieving the URL for the OPNsense Qcow2 Disk Image"
 # Use latest stable FreeBSD amd64 qcow2 VM image matching FREEBSD_MAJOR
@@ -551,9 +505,10 @@ fi
 msg_info "Downloading FreeBSD Image"
 # A mirror serving an error page returns 200, so size decides whether this
 # is an image. Anything real here is far above 5 MB.
-vm_fetch_image "$URL" "$(basename "$URL")" --min-bytes $((5 * 1024 * 1024)) || exit 1
+CACHE_FILE="$(vm_image_cache_path "$URL")"
+vm_fetch_image "$URL" "$CACHE_FILE" --cache --verify-xz --min-bytes $((5 * 1024 * 1024)) || exit 1
 echo -en "\e[1A\e[0K"
-msg_ok "Downloaded ${CL}${BL}$(basename "$URL")${CL}"
+msg_ok "Downloaded ${CL}${BL}$(basename "$CACHE_FILE")${CL}"
 
 # Check disk space again before decompression
 if ! check_disk_space "$TEMP_DIR" 15; then
@@ -563,18 +518,8 @@ if ! check_disk_space "$TEMP_DIR" 15; then
   exit 214
 fi
 
-msg_info "Decompressing FreeBSD Image (this may take a few minutes)"
 FILE=FreeBSD.qcow2
-if ! unxz -cv $(basename $URL) >${FILE}; then
-  msg_error "Failed to decompress FreeBSD image."
-  msg_error "This is usually caused by insufficient disk space."
-  df -h "$TEMP_DIR"
-  exit 115
-fi
-
-# Remove the compressed file to save space
-rm -f "$(basename "$URL")"
-msg_ok "Decompressed ${CL}${BL}${FILE}${CL}"
+vm_extract_image "$CACHE_FILE" "$TEMP_DIR/$FILE" || exit 115
 
 STORAGE_TYPE=$(pvesm status -storage $STORAGE | awk 'NR>1 {print $2}')
 case $STORAGE_TYPE in
@@ -631,42 +576,16 @@ qm set $VMID \
   -boot order=scsi0 \
   -serial0 socket \
   -tags community-script >/dev/null
-qm resize $VMID scsi0 20G >/dev/null
-DESCRIPTION=$(
-  cat <<EOF
-<div align='center'>
-  <a href='https://community-scripts.org' target='_blank' rel='noopener noreferrer'>
-    <img src='https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/images/logo-81x112.png' alt='Logo' style='width:81px;height:112px;'/>
-  </a>
-
-  <h2 style='font-size: 24px; margin: 20px 0;'>OPNsense VM</h2>
-
-  <p style='margin: 16px 0;'>
-    <a href='https://ko-fi.com/community_scripts' target='_blank' rel='noopener noreferrer'>
-      <img src='https://img.shields.io/badge/&#x2615;-Buy us a coffee-blue' alt='spend Coffee' />
-    </a>
-  </p>
-
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-github fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>GitHub</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-comments fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/discussions' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Discussions</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-exclamation-circle fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/issues' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Issues</a>
-  </span>
-</div>
-EOF
-)
-qm set $VMID -description "$DESCRIPTION" >/dev/null
+vm_resize_disk scsi0 20G
+set_description
 
 msg_info "Bridge interfaces are being added."
 qm set $VMID \
   -net0 virtio,bridge=${BRG},macaddr=${MAC}${VLAN}${MTU} 2>/dev/null
+if [ -n "$WAN_BRG" ]; then
+  qm set $VMID \
+    -net1 virtio,bridge=${WAN_BRG},macaddr=${WAN_MAC} 2>/dev/null
+fi
 msg_ok "Bridge interfaces have been successfully added."
 
 msg_ok "Created a OPNsense VM ${CL}${BL}(${HN})"
@@ -676,14 +595,8 @@ sleep 90
 send_line_to_vm "root"
 sleep 2
 send_line_to_vm ""
-send_line_to_vm "fetch https://raw.githubusercontent.com/opnsense/update/master/src/bootstrap/opnsense-bootstrap.sh.in"
-if [ -n "$WAN_BRG" ]; then
-  msg_info "Adding WAN interface"
-  qm set $VMID \
-    -net1 virtio,bridge=${WAN_BRG},macaddr=${WAN_MAC} &>/dev/null
-  msg_ok "WAN interface added"
-  sleep 5 # Brief pause after adding network interface
-fi
+send_line_to_vm "for i in \$(seq 1 60); do fetch -q https://raw.githubusercontent.com/opnsense/update/master/src/bootstrap/opnsense-bootstrap.sh.in && break; sleep 5; done"
+sleep 5
 # FreeBSD 15+ VM images ship the base system as pkgbase packages; the bootstrap's
 # "delete all packages" step would remove the running base system (/bin/rm etc.)
 # and brick the VM. Deregister them from the pkg db first - the files stay in

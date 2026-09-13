@@ -9,14 +9,15 @@ COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.co
 source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/pve/vm-core.func")
 load_functions
 
-header_info
-echo -e "\n Loading..."
 GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
 METHOD=""
 APP="TrueNAS"
 APP_TYPE="vm"
 NSAPP="truenas-vm"
+
+header_info
+echo -e "\n Loading..."
 
 ISO="${TAB}📀${TAB}${CL}"
 DISK="${TAB}💽${TAB}${CL}"
@@ -52,7 +53,7 @@ function truenas_iso_lookup() {
       pre_releases+=("$path")
     else
       local major_version=$(echo "$version" | cut -d'.' -f1,2)
-      local current_stored_path=${latest_stables["$major_version"]}
+      local current_stored_path=${latest_stables["$major_version"]:-}
       if [[ -z "$current_stored_path" ]]; then
         latest_stables["$major_version"]="$path"
       else
@@ -75,11 +76,6 @@ function truenas_iso_lookup() {
 
 TEMP_DIR=$(mktemp -d)
 pushd $TEMP_DIR >/dev/null
-if vm_confirm_new_vm "$APP" "This will create a new TrueNAS VM.\n\nProceed?"; then
-  :
-else
-  header_info && exit_script
-fi
 
 function default_settings() {
   VMID=$(get_valid_nextid)
@@ -136,10 +132,7 @@ function advanced_settings() {
   fi
 }
 
-check_root
-arch_check
-pve_check
-ssh_check
+vm_preflight
 vm_start_script "Use Default Settings?" 10 58
 post_to_api_vm
 
@@ -200,37 +193,7 @@ if [ "$IMPORT_DISKS" == "yes" ]; then
   msg_ok "Disks imported successfully"
 fi
 
-DESCRIPTION=$(
-  cat <<EOF
-<div align='center'>
-  <a href='https://community-scripts.org' target='_blank' rel='noopener noreferrer'>
-    <img src='https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/images/logo-81x112.png' alt='Logo' style='width:81px;height:112px;'/>
-  </a>
-
-  <h2 style='font-size: 24px; margin: 20px 0;'>TrueNAS Community Edition</h2>
-
-  <p style='margin: 16px 0;'>
-    <a href='https://ko-fi.com/community_scripts' target='_blank' rel='noopener noreferrer'>
-      <img src='https://img.shields.io/badge/&#x2615;-Buy us a coffee-blue' alt='spend Coffee' />
-    </a>
-  </p>
-
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-github fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>GitHub</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-comments fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/discussions' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Discussions</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-exclamation-circle fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/issues' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Issues</a>
-  </span>
-</div>
-EOF
-)
-qm set "$VMID" -description "$DESCRIPTION" >/dev/null
+set_description
 
 sleep 3
 

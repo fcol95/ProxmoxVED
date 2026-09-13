@@ -8,8 +8,6 @@ COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.co
 source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/pve/vm-core.func")
 load_functions
 
-header_info
-echo -e "\n Loading..."
 GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
 METHOD=""
@@ -22,6 +20,9 @@ var_version="n.d."
 HA=$(echo "\033[1;34m")
 
 THIN="discard=on,ssd=1,"
+
+header_info
+echo -e "\n Loading..."
 set -e
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
@@ -31,43 +32,6 @@ trap 'post_update_to_api "failed" "129"; exit 129' SIGHUP
 
 TEMP_DIR=$(mktemp -d)
 pushd $TEMP_DIR >/dev/null
-if whiptail --backtitle "Proxmox VE Helper Scripts" --title "Umbrel OS VM" --yesno "This will create a New Umbrel OS VM. Proceed?" 10 58; then
-  :
-else
-  header_info && echo -e "${CROSS}${RD}User exited script${CL}\n" && exit
-fi
-
-# This function checks the version of Proxmox Virtual Environment (PVE) and exits if the version is not supported.
-# Supported: Proxmox VE 8.0.x – 8.9.x, 9.0 and 9.2
-
-# Ensure pv is installed or abort with instructions
-function ensure_pv() {
-  if ! command -v pv &>/dev/null; then
-    msg_info "Installing required package: pv"
-    if ! apt-get update -qq &>/dev/null || ! apt-get install -y pv &>/dev/null; then
-      msg_error "Failed to install pv automatically."
-      echo -e "\nPlease run manually on the Proxmox host:\n  apt install pv\n"
-      exit 237
-    fi
-    msg_ok "Installed pv"
-  fi
-}
-
-# Extract .xz with pv
-# Args: $1=cache_file $2=target_img
-function extract_xz_with_pv() {
-  set -o pipefail
-  local file="$1"
-  local target="$2"
-
-  msg_info "Decompressing $(basename "$file") to $target"
-  if ! xz -dc "$file" | pv -N "Extracting" >"$target"; then
-    msg_error "Failed to extract $file"
-    rm -f "$target"
-    exit 115
-  fi
-  msg_ok "Decompressed to $target"
-}
 
 function default_settings() {
   vm_apply_machine_type "q35"
@@ -113,95 +77,78 @@ function advanced_settings() {
 }
 
 
-check_root
-arch_check
-pve_check
-ssh_check
-ensure_pv
+vm_preflight
 vm_start_script "Use Default Settings?" 10 58
 post_to_api_vm
 
 vm_select_storage "$HN"
 
 
-URL="https://download.umbrel.com/release/latest/umbrelos-amd64.img.xz"
-CACHE_DIR="/var/lib/vz/template/cache"
-CACHE_FILE="$CACHE_DIR/$(basename "$URL")"
-FILE_IMG="/var/lib/vz/template/tmp/${CACHE_FILE##*/%.xz}"
+msg_info "Retrieving the URL for the Umbrel OS installer ISO"
+UMBREL_RELEASE="$(curl -fsSL --max-time 20 https://api.umbrel.com/latest-release 2>/dev/null |
+  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+[[ -z "$UMBREL_RELEASE" ]] && UMBREL_RELEASE="latest"
+var_version="$UMBREL_RELEASE"
 
-mkdir -p "$CACHE_DIR" "$(dirname "$FILE_IMG")"
+URL="https://download.umbrel.com/release/${UMBREL_RELEASE}/umbrelos-amd64-usb-installer.iso"
+# The upstream file name is the same for every release, so the version goes into
+# the cached name -- otherwise the cache serves 1.7.4 to someone asking for 2.0.
+ISO_NAME="umbrelos-${UMBREL_RELEASE}-amd64-usb-installer.iso"
+CACHE_DIR="/var/lib/vz/template/iso"
+CACHE_FILE="${CACHE_DIR}/${ISO_NAME}"
+mkdir -p "$CACHE_DIR"
+msg_ok "${CL}${BL}${URL}${CL}"
 
-vm_fetch_image "$URL" "$CACHE_FILE" --cache --verify-xz || exit 115
+# download.umbrel.com answers 307 for any name at all, so a redirect proves
+# nothing about the file existing. Size is what separates an ISO from a 404 page.
+msg_info "Downloading the Umbrel OS installer ISO (approximately 1.8 GB)"
+vm_fetch_image "$URL" "$CACHE_FILE" --cache --min-bytes $((1024 * 1024 * 1024)) || exit 115
 
-qm create $VMID${MACHINE} -bios ovmf -agent 1 -tablet 0 -localtime 1 ${CPU_TYPE} \
+msg_info "Creating a Umbrel OS VM"
+# Umbrel requires EFI: the installer ISO has no legacy boot path. Its own
+# console runs on tty1, so this VM is driven through noVNC, not the serial line.
+qm create "$VMID"${MACHINE} -bios ovmf -agent enabled=1 -tablet 0 -localtime 1 ${CPU_TYPE} \
   -cores "$CORE_COUNT" -memory "$RAM_SIZE" -name "$HN" -tags community-script \
-  -net0 "virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU" -onboot 1 -ostype l26 -scsihw virtio-scsi-pci >/dev/null
+  -net0 "virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU" -onboot 1 -ostype l26 -scsihw virtio-scsi-pci \
+  -efidisk0 "${STORAGE}:1,efitype=4m,pre-enrolled-keys=0" \
+  -scsi0 "${STORAGE}:${DISK_SIZE%G},${DISK_CACHE:-}${THIN%,}" \
+  -cdrom "local:iso/${ISO_NAME}" -boot order='scsi0;ide2' >/dev/null
 
-extract_xz_with_pv "$CACHE_FILE" "$FILE_IMG"
-
-if qm disk import --help >/dev/null 2>&1; then
-  IMPORT_CMD=(qm disk import)
-else
-  IMPORT_CMD=(qm importdisk)
-fi
-IMPORT_OUT="$("${IMPORT_CMD[@]}" "$VMID" "$FILE_IMG" "$STORAGE" --format raw 2>&1 || true)"
-DISK_REF="$(printf '%s\n' "$IMPORT_OUT" | sed -n "s/.*imported disk '\([^']\+\)'.*/\1/p" | tr -d "\r\"'")"
-[[ -z "$DISK_REF" ]] && DISK_REF="$(pvesm list "$STORAGE" | awk -v id="$VMID" '$5 ~ ("vm-"id"-disk-") {print $1":"$5}' | sort | tail -n1)"
-
-qm set $VMID \
-  --efidisk0 ${STORAGE}:0,efitype=4m \
-  --scsi0 ${DISK_REF},ssd=1,discard=on \
-  --boot order=scsi0 \
-  --serial0 socket >/dev/null
-qm set $VMID --agent enabled=1 >/dev/null
-qm resize $VMID scsi0 ${DISK_SIZE} >/dev/null
-
-DESCRIPTION=$(
-  cat <<EOF
-<div align='center'>
-  <a href='https://community-scripts.org' target='_blank' rel='noopener noreferrer'>
-    <img src='https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/images/logo-81x112.png' alt='Logo' style='width:81px;height:112px;'/>
-  </a>
-
-  <h2 style='font-size: 24px; margin: 20px 0;'>Umbrel OS VM</h2>
-
-  <p style='margin: 16px 0;'>
-    <a href='https://ko-fi.com/community_scripts' target='_blank' rel='noopener noreferrer'>
-      <img src='https://img.shields.io/badge/&#x2615;-Buy us a coffee-blue' alt='spend Coffee' />
-    </a>
-  </p>
-
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-github fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>GitHub</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-comments fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/discussions' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Discussions</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-exclamation-circle fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/issues' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Issues</a>
-  </span>
-</div>
-EOF
-)
-qm set $VMID -description "$DESCRIPTION" >/dev/null
-
-if whiptail --backtitle "Proxmox VE Helper Scripts" --title "Image Cache" \
-  --yesno "Keep downloaded Umbrel OS image for future VMs?\n\nFile: $CACHE_FILE" 10 70; then
-  msg_ok "Keeping cached image"
-else
-  rm -f "$CACHE_FILE"
-  msg_ok "Deleted cached image"
-fi
-rm -f "$FILE_IMG"
-
+set_description
 msg_ok "Created a Umbrel OS VM ${CL}${BL}(${HN})"
+
+if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+  KEEP_IMAGE="${VM_KEEP_IMAGE:-yes}"
+elif vm_dialog yesno "Image Cache" \
+  "Keep downloaded Umbrel OS installer ISO for future VMs?\n\nFile: $CACHE_FILE" 10 70; then
+  KEEP_IMAGE="yes"
+else
+  KEEP_IMAGE="no"
+fi
+
+if [[ "$KEEP_IMAGE" == "yes" ]]; then
+  msg_ok "Keeping cached ISO"
+else
+  msg_warn "The ISO is still attached to the VM, so it is removed after the install"
+  KEEP_IMAGE="no"
+fi
+
 if [ "$START_VM" == "yes" ]; then
   msg_info "Starting Umbrel OS VM"
   $STD qm start $VMID
   msg_ok "Started Umbrel OS VM"
 fi
 post_update_to_api "done" "none"
+
+echo -e "\n${INFO}${BOLD}${YW}Next Steps:${CL}"
+echo -e "${TAB}1. Open the VM console in Proxmox (noVNC)"
+echo -e "${TAB}2. The installer asks which storage device to install umbrelOS on."
+echo -e "${TAB}   Pick the ${BL}sda${CL} entry -- ${BL}sr0${CL} is the installer ISO itself"
+echo -e "${TAB}3. Confirm, wait for it to finish, then press a key to power off"
+echo -e "${TAB}4. Detach the ISO (${BL}qm set ${VMID} --ide2 none${CL}) and start the VM"
+echo -e "${TAB}5. umbrelOS is then reachable at ${BL}http://umbrel.local${CL}"
+if [[ "$KEEP_IMAGE" == "no" ]]; then
+  echo -e "${TAB}   Delete ${BL}${CACHE_FILE}${CL} once the ISO is detached"
+fi
+
 msg_ok "Completed successfully!\n"

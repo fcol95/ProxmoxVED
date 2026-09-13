@@ -8,11 +8,8 @@ COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.co
 source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/pve/vm-core.func")
 load_functions
 
-header_info
-echo -e "\n Loading..."
 GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
-VERSIONS=(stable beta dev)
 METHOD=""
 APP="Home Assistant OS"
 APP_TYPE="vm"
@@ -20,12 +17,22 @@ NSAPP="haos-vm"
 var_os="homeassistant"
 DISK_SIZE="32G"
 
-for version in "${VERSIONS[@]}"; do
-  eval "$version=$(curl -fsSL https://raw.githubusercontent.com/home-assistant/version/master/stable.json | grep '"ova"' | cut -d '"' -f 4)"
+for channel in stable beta dev; do
+  channel_version=$(curl -fsSL "https://raw.githubusercontent.com/home-assistant/version/master/${channel}.json" | grep '"ova"' | cut -d '"' -f 4) || channel_version=""
+  printf -v "$channel" '%s' "$channel_version"
 done
+if [ -z "$stable" ]; then
+  echo -e "Could not determine the current Home Assistant OS release."
+  exit 1
+fi
+beta="${beta:-$stable}"
+dev="${dev:-$stable}"
 HA=$(echo "\033[1;34m")
 
 THIN="discard=on,ssd=1,"
+
+header_info
+echo -e "\n Loading..."
 set -e
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
@@ -35,43 +42,6 @@ trap 'post_update_to_api "failed" "129"; exit 129' SIGHUP
 
 TEMP_DIR=$(mktemp -d)
 pushd $TEMP_DIR >/dev/null
-if vm_confirm_new_vm "$APP" "This will create a new Homeassistant OS VM.\n\nProceed?"; then
-  :
-else
-  header_info && exit_script
-fi
-
-# This function checks the version of Proxmox Virtual Environment (PVE) and exits if the version is not supported.
-# Supported: Proxmox VE 8.0.x – 8.9.x, 9.0 and 9.2
-
-# Ensure pv is installed or abort with instructions
-function ensure_pv() {
-  if ! command -v pv &>/dev/null; then
-    msg_info "Installing required package: pv"
-    if ! apt-get update -qq &>/dev/null || ! apt-get install -y pv &>/dev/null; then
-      msg_error "Failed to install pv automatically."
-      echo -e "\nPlease run manually on the Proxmox host:\n  apt install pv\n"
-      exit 237
-    fi
-    msg_ok "Installed pv"
-  fi
-}
-
-# Extract .xz with pv
-# Args: $1=cache_file $2=target_img
-function extract_xz_with_pv() {
-  set -o pipefail
-  local file="$1"
-  local target="$2"
-
-  msg_info "Decompressing $(basename "$file") to $target"
-  if ! xz -dc "$file" | pv -N "Extracting" >"$target"; then
-    msg_error "Failed to extract $file"
-    rm -f "$target"
-    exit 115
-  fi
-  msg_ok "Decompressed to $target"
-}
 
 function default_settings() {
   BRANCH="$stable"
@@ -128,11 +98,7 @@ function advanced_settings() {
 }
 
 
-check_root
-arch_check
-pve_check
-ssh_check
-ensure_pv
+vm_preflight
 vm_start_script "Use Default Settings?" 10 58
 post_to_api_vm
 
@@ -146,11 +112,7 @@ else
   URL="https://github.com/home-assistant/operating-system/releases/download/${BRANCH}/haos_ova-${BRANCH}.qcow2.xz"
 fi
 
-CACHE_DIR="/var/lib/vz/template/cache"
-CACHE_FILE="$CACHE_DIR/$(basename "$URL")"
-FILE_IMG="/var/lib/vz/template/tmp/${CACHE_FILE##*/%.xz}" # .qcow2
-
-mkdir -p "$CACHE_DIR" "$(dirname "$FILE_IMG")"
+CACHE_FILE="$(vm_image_cache_path "$URL")"
 msg_ok "${CL}${BL}${URL}${CL}"
 
 vm_fetch_image "$URL" "$CACHE_FILE" --cache --verify-xz || exit 115
@@ -161,7 +123,8 @@ qm create $VMID${MACHINE} -bios ovmf -agent 1 -tablet 0 -localtime 1 ${CPU_TYPE}
   -net0 "virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU" -onboot 1 -ostype l26 -scsihw virtio-scsi-pci >/dev/null
 msg_ok "Created VM shell"
 
-extract_xz_with_pv "$CACHE_FILE" "$FILE_IMG"
+vm_extract_image "$CACHE_FILE" || exit 115
+FILE_IMG="$VM_IMAGE_FILE"
 
 msg_info "Importing disk into storage ($STORAGE)"
 if qm disk import --help >/dev/null 2>&1; then
@@ -190,45 +153,21 @@ qm set $VMID \
 qm set $VMID --agent enabled=1 >/dev/null
 msg_ok "Attached EFI and root disk"
 
-msg_info "Resizing disk to $DISK_SIZE"
-qm resize $VMID scsi0 ${DISK_SIZE} >/dev/null
-msg_ok "Resized disk"
+vm_resize_disk
 
-DESCRIPTION=$(
-  cat <<EOF
-<div align='center'>
-  <a href='https://community-scripts.org' target='_blank' rel='noopener noreferrer'>
-    <img src='https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/images/logo-81x112.png' alt='Logo' style='width:81px;height:112px;'/>
-  </a>
-
-  <h2 style='font-size: 24px; margin: 20px 0;'>Homeassistant OS VM</h2>
-
-  <p style='margin: 16px 0;'>
-    <a href='https://ko-fi.com/community_scripts' target='_blank' rel='noopener noreferrer'>
-      <img src='https://img.shields.io/badge/&#x2615;-Buy us a coffee-blue' alt='spend Coffee' />
-    </a>
-  </p>
-
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-github fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>GitHub</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-comments fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/discussions' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Discussions</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-exclamation-circle fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/issues' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Issues</a>
-  </span>
-</div>
-EOF
-)
-qm set $VMID -description "$DESCRIPTION" >/dev/null
+set_description
 msg_ok "Created Homeassistant OS VM ${CL}${BL}(${HN})"
 
-if vm_dialog yesno "Image Cache" \
+if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+  KEEP_IMAGE="${VM_KEEP_IMAGE:-yes}"
+elif vm_dialog yesno "Image Cache" \
   "Keep downloaded Home Assistant OS image for future VMs?\n\nFile: $CACHE_FILE" 10 70; then
+  KEEP_IMAGE="yes"
+else
+  KEEP_IMAGE="no"
+fi
+
+if [[ "$KEEP_IMAGE" == "yes" ]]; then
   msg_ok "Keeping cached image"
 else
   rm -f "$CACHE_FILE"

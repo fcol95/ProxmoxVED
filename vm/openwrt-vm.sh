@@ -11,8 +11,6 @@ COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.co
 source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/pve/vm-core.func")
 load_functions
 
-header_info
-echo -e "\n Loading..."
 RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
 METHOD=""
 APP="OpenWrt"
@@ -25,6 +23,9 @@ GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:
 GEN_MAC_LAN=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 
 HA=$(echo "\033[1;34m")
+
+header_info
+echo -e "\n Loading..."
 
 set -Eeo pipefail
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
@@ -107,15 +108,6 @@ function send_line_to_vm() {
 
 TEMP_DIR=$(mktemp -d)
 pushd $TEMP_DIR >/dev/null
-
-if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "OpenWrt VM" --yesno "This will create a New OpenWrt VM. Proceed?" 10 58); then
-  :
-else
-  header_info && echo -e "⚠ User exited script \n" && exit
-fi
-
-# This function checks the version of Proxmox Virtual Environment (PVE) and exits if the version is not supported.
-# Supported: Proxmox VE 8.0.x – 8.9.x, 9.0 and 9.2
 
 function default_settings() {
   VMID=$(get_valid_nextid)
@@ -347,53 +339,12 @@ function advanced_settings() {
   fi
 }
 
-function start_script() {
-  if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "SETTINGS" --yesno "Use Default Settings?" --no-button Advanced 10 58); then
-    header_info
-    echo -e "${BL}Using Default Settings${CL}"
-    default_settings
-  else
-    header_info
-    echo -e "${RD}Using Advanced Settings${CL}"
-    advanced_settings
-  fi
-}
 
-arch_check
-pve_check
-ssh_check
-start_script
+vm_preflight
+vm_start_script "Use Default Settings?" 10 58
 post_to_api_vm
 
-msg_info "Validating Storage"
-while read -r line; do
-  TAG=$(echo $line | awk '{print $1}')
-  TYPE=$(echo $line | awk '{printf "%-10s", $2}')
-  FREE=$(echo $line | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf( "%9sB", $6)}')
-  ITEM="  Type: $TYPE Free: $FREE "
-  OFFSET=2
-  if [[ $((${#ITEM} + $OFFSET)) -gt ${MSG_MAX_LENGTH:-} ]]; then
-    MSG_MAX_LENGTH=$((${#ITEM} + $OFFSET))
-  fi
-  STORAGE_MENU+=("$TAG" "$ITEM" "OFF")
-done < <(pvesm status -content images | awk 'NR>1')
-VALID=$(pvesm status -content images | awk 'NR>1')
-if [ -z "$VALID" ]; then
-  echo -e "\n${RD}⚠ Unable to detect a valid storage location.${CL}"
-  echo -e "Exiting..."
-  exit
-elif [ $((${#STORAGE_MENU[@]} / 3)) -eq 1 ]; then
-  STORAGE=${STORAGE_MENU[0]}
-else
-  while [ -z "${STORAGE:+x}" ]; do
-    STORAGE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "Storage Pools" --radiolist \
-      "Which storage pool would you like to use for the OpenWrt VM?\n\n" \
-      16 $(($MSG_MAX_LENGTH + 23)) 6 \
-      "${STORAGE_MENU[@]}" 3>&1 1>&2 2>&3)
-  done
-fi
-msg_ok "Using ${CL}${BL}$STORAGE${CL} ${GN}for Storage Location."
-msg_ok "Virtual Machine ID is ${CL}${BL}$VMID${CL}."
+vm_select_storage "$HN"
 msg_info "Getting URL for OpenWrt Disk Image"
 
 response=$(curl -fsSL https://openwrt.org)
@@ -403,22 +354,23 @@ URL="https://downloads.openwrt.org/releases/$stableversion/targets/x86/64/openwr
 msg_ok "${CL}${BL}${URL}${CL}"
 # A mirror serving an error page returns 200, so size decides whether this
 # is an image. Anything real here is far above 5 MB.
-vm_fetch_image "$URL" "$(basename "$URL")" --min-bytes $((5 * 1024 * 1024)) || exit 1
-FILE=$(basename "$URL")
-msg_ok "Downloaded ${CL}${BL}$FILE${CL}"
+CACHE_FILE="$(vm_image_cache_path "$URL")"
+vm_fetch_image "$URL" "$CACHE_FILE" --cache --min-bytes $((5 * 1024 * 1024)) || exit 115
 
-gunzip -f "$FILE" >/dev/null 2>&1 || true
-FILE="${FILE%.*}"
+# Decompress out of the cache rather than over it, gunzip eats its input.
+FILE="$(basename "${CACHE_FILE%.gz}")"
+gunzip -c "$CACHE_FILE" >"$FILE"
 msg_ok "Extracted OpenWrt Disk Image ${CL}${BL}$FILE${CL}"
 
 msg_info "Creating OpenWrt VM"
 qm create $VMID -cores $CORE_COUNT -memory $RAM_SIZE -name $HN \
-  -onboot 1 -ostype l26 -scsihw virtio-scsi-pci --tablet 0
+  -onboot 1 -ostype l26 -scsihw virtio-scsi-pci --tablet 0 >/dev/null
+vm_mark_created
 if [[ "$(pvesm status | awk -v s=$STORAGE '$1==s {print $2}')" == "dir" ]]; then
-  qm set $VMID -efidisk0 ${STORAGE}:0,efitype=4m,size=4M
+  qm set $VMID -efidisk0 ${STORAGE}:0,efitype=4m,size=4M >/dev/null
 else
   pvesm alloc $STORAGE $VMID vm-$VMID-disk-0 4M >/dev/null
-  qm set $VMID -efidisk0 ${STORAGE}:vm-$VMID-disk-0,efitype=4m,size=4M
+  qm set $VMID -efidisk0 ${STORAGE}:vm-$VMID-disk-0,efitype=4m,size=4M >/dev/null
 fi
 
 IMPORT_OUT="$(qm importdisk $VMID $FILE $STORAGE --format raw 2>&1 || true)"
@@ -435,7 +387,6 @@ if [[ -z "$DISK_REF" ]]; then
 fi
 
 qm set $VMID \
-  -efidisk0 ${STORAGE}:0,efitype=4m,size=4M \
   -scsi0 ${DISK_REF} \
   -boot order=scsi0 \
   -tags community-script >/dev/null
@@ -445,78 +396,60 @@ msg_info "Resizing disk to ${DISK_SIZE}"
 qm disk resize "$VMID" scsi0 "${DISK_SIZE}" >/dev/null
 msg_ok "Resized disk to ${DISK_SIZE}"
 
-DESCRIPTION=$(
-  cat <<EOF
-<div align='center'>
-  <a href='https://community-scripts.org' target='_blank' rel='noopener noreferrer'>
-    <img src='https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/images/logo-81x112.png' alt='Logo' style='width:81px;height:112px;'/>
-  </a>
-
-  <h2 style='font-size: 24px; margin: 20px 0;'>OpenWrt VM</h2>
-
-  <p style='margin: 16px 0;'>
-    <a href='https://ko-fi.com/community_scripts' target='_blank' rel='noopener noreferrer'>
-      <img src='https://img.shields.io/badge/&#x2615;-Buy us a coffee-blue' alt='spend Coffee' />
-    </a>
-  </p>
-  
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-github fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>GitHub</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-comments fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/discussions' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Discussions</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-exclamation-circle fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/issues' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Issues</a>
-  </span>
-</div>
-EOF
-)
-qm set $VMID -description "$DESCRIPTION" >/dev/null
+set_description
 
 msg_ok "Created OpenWrt VM ${CL}${BL}(${HN})"
-msg_info "OpenWrt is being started in order to configure the network interfaces."
+
+# Started here whatever START_VM says: the network has to be configured from
+# inside the guest before the VM is any use.
+msg_info "Booting OpenWrt to configure its network interfaces"
 $STD qm start $VMID
 sleep 15
-msg_info "Waiting for OpenWrt to boot..."
+VM_STATE=""
 for i in {1..30}; do
-  if qm status "$VMID" | grep -q "running"; then
-    sleep 5
-    msg_ok "OpenWrt is running"
-    break
+  # A missing config means the VM is gone, not slow. Waiting out the other 29
+  # tries only bought 29 more copies of the same error.
+  if ! VM_STATE="$(qm status "$VMID" 2>&1)"; then
+    msg_error "VM $VMID no longer exists: ${VM_STATE}"
+    exit 226
   fi
+  [[ "$VM_STATE" == *running* ]] && break
   sleep 1
 done
 
-msg_ok "Network interfaces are being configured as OpenWrt initiates."
-
-if qm status "$VMID" | grep -q "running"; then
-  send_line_to_vm ""
-  send_line_to_vm "uci delete network.@device[0]"
-  send_line_to_vm "uci set network.wan=interface"
-  send_line_to_vm "uci set network.wan.device=eth1"
-  send_line_to_vm "uci set network.wan.proto=dhcp"
-  send_line_to_vm "uci delete network.lan"
-  send_line_to_vm "uci set network.lan=interface"
-  send_line_to_vm "uci set network.lan.device=eth0"
-  send_line_to_vm "uci set network.lan.proto=static"
-  send_line_to_vm "uci set network.lan.ipaddr=${LAN_IP_ADDR}"
-  send_line_to_vm "uci set network.lan.netmask=${LAN_NETMASK}"
-  send_line_to_vm "uci commit"
-  send_line_to_vm "poweroff"
-  msg_ok "Network interfaces configured in OpenWrt"
-else
-  msg_error "VM is not running"
+if [[ "$VM_STATE" != *running* ]]; then
+  msg_error "VM $VMID did not reach running state: ${VM_STATE}"
   exit 226
 fi
+sleep 5
+msg_ok "OpenWrt is running"
 
-msg_info "Waiting for OpenWrt to shut down..."
-until qm status "$VMID" | grep -q "stopped"; do
+msg_info "Configuring network interfaces in OpenWrt"
+send_line_to_vm ""
+send_line_to_vm "uci delete network.@device[0]"
+send_line_to_vm "uci set network.wan=interface"
+send_line_to_vm "uci set network.wan.device=eth1"
+send_line_to_vm "uci set network.wan.proto=dhcp"
+send_line_to_vm "uci delete network.lan"
+send_line_to_vm "uci set network.lan=interface"
+send_line_to_vm "uci set network.lan.device=eth0"
+send_line_to_vm "uci set network.lan.proto=static"
+send_line_to_vm "uci set network.lan.ipaddr=${LAN_IP_ADDR}"
+send_line_to_vm "uci set network.lan.netmask=${LAN_NETMASK}"
+send_line_to_vm "uci commit"
+send_line_to_vm "poweroff"
+msg_ok "Network interfaces configured in OpenWrt"
+
+msg_info "Waiting for OpenWrt to shut down"
+for i in {1..60}; do
+  VM_STATE="$(qm status "$VMID" 2>&1)" || break
+  [[ "$VM_STATE" == *stopped* ]] && break
   sleep 2
 done
+if [[ "$VM_STATE" != *stopped* ]]; then
+  msg_error "OpenWrt did not shut down: ${VM_STATE}"
+  exit 226
+fi
 msg_ok "OpenWrt has shut down"
 
 msg_info "Adding bridge interfaces on Proxmox side"
@@ -532,7 +465,7 @@ if [ "$START_VM" = "yes" ]; then
 fi
 
 VLAN_FINISH=""
-if [ -z "$VLAN" ] && [ "$VLAN2" != "999" ]; then
+if [ -z "$VLAN" ] && [ "${VLAN2:-}" != "999" ]; then
   VLAN_FINISH=" Please remember to adjust the VLAN tags to suit your network."
 fi
 post_update_to_api "done" "none"

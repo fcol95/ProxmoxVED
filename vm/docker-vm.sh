@@ -46,43 +46,56 @@ trap 'post_update_to_api "failed" "129"; exit 129' SIGHUP
 # OS SELECTION FUNCTIONS
 # ==============================================================================
 function select_os() {
-  if OS_CHOICE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "SELECT OS" --radiolist \
-    "Choose Operating System for Docker VM" 14 68 4 \
+  if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+    OS_CHOICE="${VM_OS_VERSION:-debian13}"
+  elif ! OS_CHOICE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "SELECT OS" --radiolist \
+    "Choose Operating System for Docker VM" 15 68 5 \
     "debian13" "Debian 13 (Trixie) - Latest" ON \
     "debian12" "Debian 12 (Bookworm) - Stable" OFF \
+    "ubuntu2604" "Ubuntu 26.04 LTS (Resolute)" OFF \
     "ubuntu2404" "Ubuntu 24.04 LTS (Noble)" OFF \
     "ubuntu2204" "Ubuntu 22.04 LTS (Jammy)" OFF \
     3>&1 1>&2 2>&3); then
-    case $OS_CHOICE in
-    debian13)
-      OS_TYPE="debian"
-      OS_VERSION="13"
-      OS_CODENAME="trixie"
-      OS_DISPLAY="Debian 13 (Trixie)"
-      ;;
-    debian12)
-      OS_TYPE="debian"
-      OS_VERSION="12"
-      OS_CODENAME="bookworm"
-      OS_DISPLAY="Debian 12 (Bookworm)"
-      ;;
-    ubuntu2404)
-      OS_TYPE="ubuntu"
-      OS_VERSION="24.04"
-      OS_CODENAME="noble"
-      OS_DISPLAY="Ubuntu 24.04 LTS"
-      ;;
-    ubuntu2204)
-      OS_TYPE="ubuntu"
-      OS_VERSION="22.04"
-      OS_CODENAME="jammy"
-      OS_DISPLAY="Ubuntu 22.04 LTS"
-      ;;
-    esac
-    echo -e "${OS}${BOLD}${DGN}Operating System: ${BGN}${OS_DISPLAY}${CL}"
-  else
     exit_script
   fi
+
+  case $OS_CHOICE in
+  debian13)
+    OS_TYPE="debian"
+    OS_VERSION="13"
+    OS_CODENAME="trixie"
+    OS_DISPLAY="Debian 13 (Trixie)"
+    ;;
+  debian12)
+    OS_TYPE="debian"
+    OS_VERSION="12"
+    OS_CODENAME="bookworm"
+    OS_DISPLAY="Debian 12 (Bookworm)"
+    ;;
+  ubuntu2604)
+    OS_TYPE="ubuntu"
+    OS_VERSION="26.04"
+    OS_CODENAME="resolute"
+    OS_DISPLAY="Ubuntu 26.04 LTS"
+    ;;
+  ubuntu2404)
+    OS_TYPE="ubuntu"
+    OS_VERSION="24.04"
+    OS_CODENAME="noble"
+    OS_DISPLAY="Ubuntu 24.04 LTS"
+    ;;
+  ubuntu2204)
+    OS_TYPE="ubuntu"
+    OS_VERSION="22.04"
+    OS_CODENAME="jammy"
+    OS_DISPLAY="Ubuntu 22.04 LTS"
+    ;;
+  *)
+    msg_error "Unsupported OS '${OS_CHOICE}' (expected debian13, debian12, ubuntu2604, ubuntu2404 or ubuntu2204)"
+    exit 1
+    ;;
+  esac
+  echo -e "${OS}${BOLD}${DGN}Operating System: ${BGN}${OS_DISPLAY}${CL}"
 }
 
 function select_cloud_init() {
@@ -175,16 +188,7 @@ function advanced_settings() {
 # ==============================================================================
 header_info
 
-check_root
-arch_check
-pve_check
-ssh_check
-
-if vm_confirm_new_vm "$APP" "This will create a new Docker VM.\n\nProceed?"; then
-  :
-else
-  header_info && exit_script
-fi
+vm_preflight
 
 vm_start_script "Use Default Settings?" 10 58
 post_to_api_vm

@@ -10,14 +10,12 @@ load_functions
 # Load Cloud-Init library for VM configuration
 source /dev/stdin <<<$(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/vm/cloud-init.func") 2>/dev/null || true
 
-header_info
-echo -e "\n Loading..."
 GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
 METHOD=""
 APP="Unifi OS Server VM"
 APP_TYPE="vm"
-NSAPP="UniFi OS Server"
+NSAPP="unifi-os-server-vm"
 var_os="-"
 var_version="-"
 USE_CLOUD_INIT="yes" # Always use Cloud-Init for UniFi OS (required for automated setup)
@@ -30,6 +28,9 @@ HA=$(echo "\033[1;34m")
 
 THIN="discard=on,ssd=1,"
 
+header_info
+echo -e "\n Loading..."
+
 set -Eeuo pipefail
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
@@ -38,39 +39,36 @@ trap 'post_update_to_api "failed" "TERMINATED"' SIGTERM
 
 TEMP_DIR=$(mktemp -d)
 pushd $TEMP_DIR >/dev/null
-if whiptail --backtitle "Proxmox VE Helper Scripts" --title "Unifi OS VM" --yesno "This will create a New Unifi OS VM. Proceed?" 10 58; then
-  :
-else
-  header_info && echo -e "${CROSS}${RD}User exited script${CL}\n" && exit
-fi
-
-# This function checks the version of Proxmox Virtual Environment (PVE) and exits if the version is not supported.
-# Supported: Proxmox VE 8.0.x – 8.9.x and 9.0 – 9.2
 
 function select_os() {
-  if OS_CHOICE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "SELECT OS" --radiolist \
+  if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+    OS_CHOICE="${VM_OS_VERSION:-debian13}"
+  elif ! OS_CHOICE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "SELECT OS" --radiolist \
     "Choose Operating System for UniFi OS VM" 12 68 2 \
     "debian13" "Debian 13 (Trixie) - Latest" ON \
     "ubuntu2404" "Ubuntu 24.04 LTS (Noble)" OFF \
     3>&1 1>&2 2>&3); then
-    case $OS_CHOICE in
-    debian13)
-      OS_TYPE="debian"
-      OS_VERSION="13"
-      OS_CODENAME="trixie"
-      OS_DISPLAY="Debian 13 (Trixie)"
-      ;;
-    ubuntu2404)
-      OS_TYPE="ubuntu"
-      OS_VERSION="24.04"
-      OS_CODENAME="noble"
-      OS_DISPLAY="Ubuntu 24.04 LTS"
-      ;;
-    esac
-    #echo -e "${OS}${BOLD}${DGN}Operating System: ${BGN}${OS_DISPLAY}${CL}"
-  else
     exit_script
   fi
+
+  case $OS_CHOICE in
+  debian13)
+    OS_TYPE="debian"
+    OS_VERSION="13"
+    OS_CODENAME="trixie"
+    OS_DISPLAY="Debian 13 (Trixie)"
+    ;;
+  ubuntu2404)
+    OS_TYPE="ubuntu"
+    OS_VERSION="24.04"
+    OS_CODENAME="noble"
+    OS_DISPLAY="Ubuntu 24.04 LTS"
+    ;;
+  *)
+    msg_error "Unsupported OS '${OS_CHOICE}' (expected debian13 or ubuntu2404)"
+    exit 1
+    ;;
+  esac
 }
 
 function select_cloud_init() {
@@ -80,6 +78,16 @@ function select_cloud_init() {
 }
 
 function set_root_password() {
+  if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+    USER_PASSWORD="${VM_ROOT_PASSWORD:-$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | cut -c1-8)}"
+    if [[ -z "${VM_ROOT_PASSWORD:-}" ]]; then
+      echo -e "${INFO}${BOLD}${DGN}Root Password: ${BGN}${USER_PASSWORD}${CL}"
+    else
+      echo -e "${INFO}${BOLD}${DGN}Root Password: ${BGN}(set)${CL}"
+    fi
+    return
+  fi
+
   while true; do
     if PW1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --passwordbox "Set root password for the VM" 8 58 --title "ROOT PASSWORD" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
       if [ -z "$PW1" ]; then
@@ -106,6 +114,22 @@ function set_root_password() {
 function set_ssh_keys() {
   SSH_KEYS_FILE=""
   SSH_KEY_COUNT=0
+
+  if [[ "${VM_UNATTENDED:-0}" == "1" ]]; then
+    if [[ -n "${VM_SSH_KEYS:-}" ]]; then
+      SSH_KEYS_FILE=$(mktemp)
+      if [[ -f "$VM_SSH_KEYS" ]]; then
+        cat "$VM_SSH_KEYS" >"$SSH_KEYS_FILE"
+      else
+        echo "$VM_SSH_KEYS" >"$SSH_KEYS_FILE"
+      fi
+      SSH_KEY_COUNT=$(grep -c . "$SSH_KEYS_FILE" || true)
+      echo -e "${INFO}${BOLD}${DGN}SSH Keys: ${BGN}${SSH_KEY_COUNT} key(s) added${CL}"
+    else
+      echo -e "${INFO}${BOLD}${DGN}SSH Keys: ${BGN}none (password auth only)${CL}"
+    fi
+    return
+  fi
 
   while true; do
     if PASTED_KEY=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox \
@@ -206,10 +230,7 @@ function advanced_settings() {
   fi
 }
 
-check_root
-arch_check
-pve_check
-ssh_check
+vm_preflight
 
 vm_start_script "Use Default Settings?" 10 58
 post_to_api_vm
@@ -247,8 +268,8 @@ msg_info "Fetching latest UniFi OS Server version"
 # Install jq if not available
 if ! command -v jq &>/dev/null; then
   msg_info "Installing jq for JSON parsing"
-  apt-get update -qq >/dev/null 2>&1
-  apt-get install -y jq -qq >/dev/null 2>&1
+  $STD apt-get update
+  $STD apt-get install -y jq
 fi
 
 # Download firmware list from Ubiquiti API
@@ -289,20 +310,20 @@ msg_info "Downloading ${OS_DISPLAY} Cloud Image"
 URL=$(get_image_url)
 sleep 2
 msg_ok "${CL}${BL}${URL}${CL}"
-curl -f#SL -o "$(basename "$URL")" "$URL"
-echo -en "\e[1A\e[0K"
-FILE=$(basename $URL)
-msg_ok "Downloaded ${CL}${BL}${FILE}${CL}"
-
-msg_ok "Downloaded ${OS_DISPLAY} Cloud Image"
+CACHE_FILE="$(vm_image_cache_path "$URL")"
+vm_fetch_image "$URL" "$CACHE_FILE" --cache --min-bytes $((100 * 1024 * 1024)) || exit 115
+FILE="$(basename "$CACHE_FILE")"
+# Work on a copy: virt-resize and virt-customize below rewrite the image,
+# which would poison the cache for every later VM.
+cp -f "$CACHE_FILE" "$FILE"
 
 # Expand root partition to use full disk space
 msg_info "Expanding disk image to ${DISK_SIZE}"
 
 # Install virt-resize if not available
 if ! command -v virt-resize &>/dev/null; then
-  apt-get -qq update >/dev/null
-  apt-get -qq install libguestfs-tools -y >/dev/null
+  $STD apt-get update
+  $STD apt-get install -y libguestfs-tools
 fi
 
 qemu-img create -f qcow2 expanded.qcow2 ${DISK_SIZE} >/dev/null 2>&1
@@ -424,8 +445,9 @@ StandardOutput=journal+console
 WantedBy=multi-user.target
 SVCEOF
 
-virt-customize -a "${FILE}" \
 vm_prepare_cloud_image "$FILE" "$HN" || true
+
+virt-customize -a "${FILE}" \
   --upload "unifi-os-server.bin:/opt/unifi-os-server.bin" \
   --chmod 0755:/opt/unifi-os-server.bin \
   --upload "$FIRSTBOOT_SCRIPT:/opt/unifi-os-firstboot.sh" \
@@ -459,7 +481,7 @@ qm set "$VMID" \
   -efidisk0 "${STORAGE}:0${FORMAT},size=4M" \
   -scsi0 "${DISK_REF},${DISK_CACHE}size=${DISK_SIZE}" \
   -boot order=scsi0 -serial0 socket >/dev/null
-qm resize "$VMID" scsi0 "$DISK_SIZE" >/dev/null
+vm_resize_disk
 qm set "$VMID" --agent enabled=1 >/dev/null
 
 # Whole block guarded: --cipassword and --sshkeys need the drive too.
@@ -478,37 +500,7 @@ else
   msg_warn "Cloud-Init helpers unavailable -- VM created, but no Cloud-Init drive, password or SSH keys were set"
 fi
 
-DESCRIPTION=$(
-  cat <<EOF
-<div align='center'>
-  <a href='https://Helper-Scripts.com' target='_blank' rel='noopener noreferrer'>
-    <img src='${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/images/logo-81x112.png' alt='Logo' style='width:81px;height:112px;'/>
-  </a>
-
-  <h2 style='font-size: 24px; margin: 20px 0;'>Unifi OS VM</h2>
-
-  <p style='margin: 16px 0;'>
-    <a href='https://ko-fi.com/community_scripts' target='_blank' rel='noopener noreferrer'>
-      <img src='https://img.shields.io/badge/&#x2615;-Buy us a coffee-blue' alt='spend Coffee' />
-    </a>
-  </p>
-
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-github fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>GitHub</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-comments fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/discussions' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Discussions</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-exclamation-circle fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/issues' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Issues</a>
-  </span>
-</div>
-EOF
-)
-qm set "$VMID" -description "$DESCRIPTION" >/dev/null
+set_description
 
 msg_ok "Created a UniFi OS VM ${CL}${BL}(${HN})"
 msg_info "Operating System: ${OS_DISPLAY}"
