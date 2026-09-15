@@ -31,6 +31,7 @@ cd mp4v2-master || exit
 $STD ./configure
 $STD make
 $STD make install
+$STD ldconfig
 cd ~ || exit
 rm -rf /tmp/mp4v2-master /tmp/mp4v2.tar.gz
 msg_ok "Installed mp4v2"
