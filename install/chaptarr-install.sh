@@ -15,12 +15,30 @@ network_check
 update_os
 
 msg_info "Installing Dependencies"
-$STD apt install -y build-essential python3-dev
+$STD apt install -y build-essential python3-dev sqlite3 libsqlite3-0 wget
 msg_ok "Installed Dependencies"
 
 setup_ffmpeg
 NODE_VERSION="22" NODE_MODULE="yarn" setup_nodejs
 DOTNET_VERSION="10" DOTNET_TYPE="sdk" setup_dotnet
+PHP_VERSION="8.3" PHP_MODULE="cli,mbstring,xml,json,curl,zip" setup_php
+
+msg_info "Installing mp4v2 (m4b-tool dependency)"
+cd /tmp || exit
+wget -q https://github.com/sandreas/mp4v2/archive/refs/heads/master.tar.gz -O mp4v2.tar.gz
+tar -xzf mp4v2.tar.gz
+cd mp4v2-master || exit
+$STD ./configure
+$STD make
+$STD make install
+cd ~ || exit
+rm -rf /tmp/mp4v2-master /tmp/mp4v2.tar.gz
+msg_ok "Installed mp4v2"
+
+msg_info "Installing m4b-tool"
+wget -qO /usr/local/bin/m4b-tool https://github.com/sandreas/m4b-tool/releases/download/v0.5.2/m4b-tool.phar
+chmod +x /usr/local/bin/m4b-tool
+msg_ok "Installed m4b-tool"
 
 GH_INCLUDE_PRERELEASE=1 fetch_and_deploy_gh_release "chaptarr" "Chaptarr/chaptarr" "tarball"
 
@@ -51,7 +69,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/chaptarr_app
 Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
-ExecStart=/usr/bin/dotnet /opt/chaptarr_app/Chaptarr.dll --data=/opt/chaptarr_data
+ExecStart=/usr/bin/dotnet /opt/chaptarr_app/Chaptarr.dll -nobrowser -data=/opt/chaptarr_data
 Restart=on-failure
 RestartSec=10
 

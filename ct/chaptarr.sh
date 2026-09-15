@@ -9,12 +9,12 @@ source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_
 
 APP="Chaptarr"
 var_tags="${var_tags:-arr;audiobooks;ebooks;media}"
-var_cpu="${var_cpu:-2}"
-var_ram="${var_ram:-2048}"
-var_disk="${var_disk:-8}"
+var_cpu="${var_cpu:-4}"
+var_ram="${var_ram:-4096}"
+var_disk="${var_disk:-40}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}" # unset = ask the user; set yes/no only when verified
+var_arm64="${var_arm64:-no}" # m4b-tool and mp4v2 compiling can be problematic on ARM, keeping it no for now
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
