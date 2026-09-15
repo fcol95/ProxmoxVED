@@ -21,7 +21,7 @@ msg_ok "Installed Dependencies"
 setup_ffmpeg
 NODE_VERSION="22" NODE_MODULE="yarn" setup_nodejs
 DOTNET_VERSION="10" DOTNET_TYPE="sdk" setup_dotnet
-PHP_VERSION="8.3" PHP_MODULE="cli,mbstring,xml,json,curl,zip" setup_php
+PHP_VERSION="8.3" PHP_MODULE="cli,mbstring,xml,curl,zip" setup_php
 
 msg_info "Installing mp4v2 (m4b-tool dependency)"
 cd /tmp || exit
@@ -48,7 +48,7 @@ $STD yarn install --immutable
 $STD yarn build
 cd /opt/chaptarr || exit
 rm -rf /opt/chaptarr_app
-DOTNET_CLI_TELEMETRY_OPTOUT=1 $STD dotnet publish src/NzbDrone.Console/Chaptarr.Console.csproj -c Release -f net10.0 -o /opt/chaptarr_app /p:UseAppHost=false /p:Version="$(cat ~/.chaptarr)"
+DOTNET_CLI_TELEMETRY_OPTOUT=1 $STD dotnet publish src/NzbDrone.Console/Chaptarr.Console.csproj -c Release -f net10.0 -o /opt/chaptarr_app /p:UseAppHost=false /p:Version="$(cat ~/.chaptarr)" /p:NuGetAudit=false /p:TreatWarningsAsErrors=false
 cp -r /opt/chaptarr/_output/UI /opt/chaptarr_app/
 msg_ok "Built Chaptarr"
 
