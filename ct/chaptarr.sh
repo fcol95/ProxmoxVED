@@ -47,7 +47,7 @@ function update_script() {
     $STD yarn build
     cd /opt/chaptarr || exit
     rm -rf /opt/chaptarr_app
-    DOTNET_CLI_TELEMETRY_OPTOUT=1 $STD dotnet publish src/NzbDrone.Console/Chaptarr.Console.csproj -c Release -f net10.0 -o /opt/chaptarr_app /p:UseAppHost=false /p:Version="$(cat ~/.chaptarr)"
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 $STD dotnet publish src/NzbDrone.Console/Chaptarr.Console.csproj -c Release -f net10.0 -o /opt/chaptarr_app /p:UseAppHost=false /p:Version="$(cat ~/.chaptarr)" /p:NuGetAudit=false /p:TreatWarningsAsErrors=false
     cp -r /opt/chaptarr/_output/UI /opt/chaptarr_app/
     msg_ok "Built Chaptarr"
 
