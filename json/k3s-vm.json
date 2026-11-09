@@ -36,7 +36,11 @@
   },
   "notes": [
     {
-      "text": "Cloud-Init is enabled by default. Configure your SSH key and credentials in the Proxmox Cloud-Init tab before starting the VM.",
+      "text": "Cloud-Init sets up credentials, SSH keys and networking. If you turn it off on Debian, root logs in on the console without a password, so set one right away.",
+      "type": "warning"
+    },
+    {
+      "text": "ArgoCD is installed on first boot by default. Set INSTALL_ARGOCD_BOOTSTRAP=0 to skip it.",
       "type": "info"
     },
     {

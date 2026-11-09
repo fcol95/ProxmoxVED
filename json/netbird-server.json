@@ -36,7 +36,7 @@
   },
   "notes": [
     {
-      "text": "Cloud-Init is enabled by default. Configure your SSH key and credentials in the Proxmox Cloud-Init tab before starting the VM.",
+      "text": "Needs a public domain whose DNS A record points at this VM, with 80/tcp, 443/tcp and 3478/udp reachable. The install asks for it; unattended installs must set VM_NETBIRD_DOMAIN.",
       "type": "info"
     },
     {

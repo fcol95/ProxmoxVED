@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/DevScripts/main"
 _cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
 source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
-# License: MIT | https://github.com/community-scripts/ProxmoxVED/raw/main/LICENSE
+# License: MIT | https://github.com/community-scripts/DevScripts/raw/main/LICENSE
 # Source: https://github.com/vllm-project/vllm
 
 APP="vLLM"
@@ -16,7 +17,7 @@ var_version="${var_version:-13}"
 var_gpu="${var_gpu:-yes}"
 #var_arm64="${var_arm64:-no}" # unset = ask the user; set yes/no only when verified
 var_unprivileged="${var_unprivileged:-1}"
-var_testurl="${var_testurl:-https://github.com/community-scripts/ProxmoxVED/issues/2047}"
+var_testurl="${var_testurl:-https://github.com/community-scripts/DevScripts/issues/2047}"
 
 header_info "$APP"
 variables
@@ -49,9 +50,14 @@ function update_script() {
         --extra-index-url https://wheels.vllm.ai/rocm/
       ;;
     cpu)
-      $STD uv pip install --python /opt/vllm/bin/python \
-        "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_x86_64.whl" \
-        --torch-backend cpu
+      github_api_call "https://api.github.com/repos/vllm-project/vllm/releases/tags/v${VLLM_VERSION}" /tmp/vllm-release.json
+      VLLM_WHEEL="$(jq -r '.assets[] | select(.name | endswith("+cpu-cp38-abi3-manylinux_2_39_x86_64.whl")) | .browser_download_url' /tmp/vllm-release.json | head -n1)"
+      rm -f /tmp/vllm-release.json
+      [[ -n "$VLLM_WHEEL" ]] || {
+        msg_error "vLLM ${VLLM_VERSION} has no CPU wheel for x86_64"
+        exit 1
+      }
+      $STD uv pip install --python /opt/vllm/bin/python "$VLLM_WHEEL" --torch-backend cpu
       ;;
     *)
       $STD uv pip install --python /opt/vllm/bin/python --upgrade vllm

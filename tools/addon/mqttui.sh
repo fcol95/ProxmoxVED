@@ -119,6 +119,7 @@ function update_mqttui() {
 
     msg_info "Updating ${APP}"
     cd "$APP_DIR"
+    $STD uv venv /opt/mqttui/.venv
     $STD uv pip install -r requirements.txt
     msg_ok "Updated ${APP}"
 

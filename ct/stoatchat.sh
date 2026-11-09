@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/DevScripts/main"
 _cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
 source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
-# License: MIT | https://github.com/community-scripts/ProxmoxVED/raw/main/LICENSE
+# License: MIT | https://github.com/community-scripts/DevScripts/raw/main/LICENSE
 # Source: https://github.com/stoatchat/stoatchat
 
 APP="Stoatchat"
@@ -15,7 +16,7 @@ var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
 #var_arm64="${var_arm64:-no}" # unset = ask the user; set yes/no only when verified
 var_unprivileged="${var_unprivileged:-1}"
-var_testurl="${var_testurl:-https://github.com/community-scripts/ProxmoxVED/issues/1849}"
+var_testurl="${var_testurl:-https://github.com/community-scripts/DevScripts/issues/1849}"
 
 header_info "$APP"
 variables
@@ -62,7 +63,9 @@ function update_script() {
     $STD pnpm --filter client exec lingui compile --typescript
     $STD pnpm --filter client exec node scripts/copyAssets.mjs
     $STD pnpm --filter client exec panda codegen
-    $STD pnpm --filter client exec vite build
+    VITE_API_URL="$(sed -n 's/^api = "\(.*\)"$/\1/p' /Revolt.toml)" \
+      VITE_HOST="$(sed -n 's|^app = "https\{0,1\}://\([^"/]*\).*|\1|p' /Revolt.toml)" \
+      $STD pnpm --filter client exec vite build
     msg_ok "Updated Web Frontend"
 
     restore_backup
@@ -82,4 +85,4 @@ description
 msg_ok "Completed Successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
 echo -e "${INFO}${YW}Access it using the following URL:${CL}"
-echo -e "${GATEWAY}${BGN}http://${IP}${CL}"
+echo -e "${GATEWAY}${BGN}https://${IP}${CL}"
